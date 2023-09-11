@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -32,17 +33,36 @@ var yellow = color.New(color.FgYellow).SprintFunc()
 var stdoutIsTty = isatty.IsTerminal(uintptr(syscall.Stdout))
 
 func writeOut(out *Output) {
-	for _, part := range out.parts {
-		_, _ = syscall.Write(part.fromFd, part.content)
+	var clearedOutBytes int64
+
+	var offset int
+	for chunk, ok := out.nextChunk(&offset); ok; {
+		fd, content := chunk[0], chunk[1:]
+		_, _ = syscall.Write(int(fd), content)
+
+		clearedOutBytes += int64(len(content))
 	}
-	clear(out.parts)
+
+	out.allocator.mustFree(out.parts)
+	out.parts = nil
+	out.allocator.mustClose()
+
+	// just freed a bit of memory, so let's hope running a gc cycle does something
+	runtime.GC()
+
+	mem.freedMemory.L.Lock()
+	defer mem.freedMemory.L.Unlock()
+
+	mem.currentlyStored.Store(-clearedOutBytes)
+	mem.currentlyInTheForeground = out
+	mem.freedMemory.Broadcast()
 }
 
 func toForeground(proc ProcessResult) (exitCode int) {
-	proc.output.mutex.Lock()
+	proc.output.partsMutex.Lock()
 	writeOut(proc.output)
 	proc.output.shouldPassToParent = true
-	proc.output.mutex.Unlock()
+	proc.output.partsMutex.Unlock()
 
 	err := proc.wait()
 	var exitErr *exec.ExitError

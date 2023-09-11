@@ -20,19 +20,15 @@ import (
 
 const MAXBUF = 32 * 1024
 
-type OutputPart struct {
-	fromFd  int
-	content []byte
-}
-
 type Output struct {
-	mutex              sync.Mutex
+	parts              []byte
+	partsMutex         sync.Mutex
 	shouldPassToParent bool
-	parts              []OutputPart
 	stdoutPipeOrPty    *os.File
 	stderrPipeOrPty    *os.File
 	winchSignal        chan os.Signal
 	streamClosed       chan struct{}
+	allocator          chunkAllocator
 }
 
 type ProcessResult struct {
@@ -78,9 +74,9 @@ func (proc ProcessResult) wait() error {
 	return waitError
 }
 
-func (out *Output) append(buf []byte, dataFromFd int) {
-	out.mutex.Lock()
-	defer out.mutex.Unlock()
+func (out *Output) appendOrWrite(buf []byte, dataFromFd int) {
+	out.partsMutex.Lock()
+	defer out.partsMutex.Unlock()
 
 	if out.shouldPassToParent {
 		_, err := syscall.Write(dataFromFd, buf)
@@ -88,10 +84,17 @@ func (out *Output) append(buf []byte, dataFromFd int) {
 			log.Fatalf("Syscall write to fd %d: %v\n", dataFromFd, err)
 		}
 	} else {
-		out.parts = append(out.parts, OutputPart{
-			fromFd:  dataFromFd,
-			content: buf,
-		})
+		out.appendChunk(byte(dataFromFd), buf)
+	}
+}
+
+func waitIfUsingTooMuchMemory(willSaveBytes int64, out *Output) {
+	mem.freedMemory.L.Lock()
+	defer mem.freedMemory.L.Unlock()
+
+	mem.currentlyStored.Add(willSaveBytes)
+	for mem.currentlyStored.Load() > mem.max && mem.currentlyInTheForeground != out {
+		mem.freedMemory.Wait()
 	}
 }
 
@@ -102,10 +105,13 @@ func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
 		count, err := stream.Read(buffer)
 
 		if count > 0 {
-			data := make([]byte, count)
-			copy(data, buffer[:count:count])
+			waitIfUsingTooMuchMemory(int64(count), out)
 
-			out.append(data, fileDescriptor)
+			//data := make([]byte, count)
+			//copy(data, buffer[:count:count])
+
+			//out.appendOrWrite(data, fileDescriptor)
+			out.appendOrWrite(buffer[:count], fileDescriptor)
 		}
 
 		if err != nil {
@@ -115,7 +121,7 @@ func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
 			if errors.Is(err, fs.ErrClosed) {
 				break
 			}
-			log.Fatalf("error from read: %v\n", err)
+			log.Printf("error from read: %v\n", err)
 		}
 	}
 
