@@ -25,13 +25,17 @@ type OutputPart struct {
 }
 
 type Output struct {
-	mutex              sync.Mutex
-	shouldPassToParent bool
-	parts              []OutputPart
-	stdoutPty          *os.File
-	stderrPty          *os.File
-	winchSignal        chan os.Signal
-	//streamClosed       chan struct{}
+	mutex                    sync.Mutex
+	shouldPassToParent       bool
+	parts                    []OutputPart
+	stdoutPty                *os.File
+	stderrPty                *os.File
+	stdoutTty                *os.File
+	stderrTty                *os.File
+	stdoutNoninteractivePipe io.ReadCloser
+	stderrNoninteractivePipe io.ReadCloser
+	winchSignal              chan os.Signal
+	streamClosed             chan struct{}
 }
 
 type ProcessResult struct {
@@ -59,18 +63,23 @@ func (proc ProcessResult) wait() error {
 
 	signal.Stop(proc.output.winchSignal)
 
-	_ = proc.output.stdoutPty.Sync()
-	_ = proc.output.stderrPty.Sync()
+	// if running in non-interactive mode, Go's exec#Wait() will close pipes for us
+	// as they are created with .StdoutPipe() and .StderrPipe()
+	if stdoutIsTty {
+		// this looks weird but makes stream closing a bit faster
+		_, _ = proc.output.stdoutPty.Write([]byte{})
+		_, _ = proc.output.stderrPty.Write([]byte{})
 
-	// todo: write some weird terminal escape sequence to proc.cmd.Stdout and proc.cmd.Stderr
-	//       and wait for it as a close signal
+		_ = proc.output.stdoutPty.Close()
+		_ = proc.output.stderrPty.Close()
 
-	//_ = proc.output.stdoutPty.Close()
-	//_ = proc.output.stderrPty.Close()
+		_ = proc.output.stdoutTty.Close()
+		_ = proc.output.stderrTty.Close()
+	}
 
 	// wait for both stdout and stderr
-	//<-proc.output.streamClosed
-	//<-proc.output.streamClosed
+	<-proc.output.streamClosed
+	<-proc.output.streamClosed
 
 	return waitError
 }
@@ -116,19 +125,18 @@ func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
 		}
 	}
 
-	//out.streamClosed <- struct{}{}
+	out.streamClosed <- struct{}{}
 }
 
 func runInteractive(cmd *exec.Cmd) *Output {
 	out := &Output{}
-	var stdoutTty, stderrTty *os.File
 
 	size, err := pty.GetsizeFull(os.Stdout)
 	if err != nil {
 		log.Fatalf("Could not get terminal size: %v\n", err)
 	}
 
-	out.stdoutPty, stdoutTty, err = pty.Open()
+	out.stdoutPty, out.stdoutTty, err = pty.Open()
 	if err != nil {
 		log.Fatalf("Couldn't open a pty for %v's stdout: %v\n", cmd.Args, err)
 	}
@@ -137,7 +145,7 @@ func runInteractive(cmd *exec.Cmd) *Output {
 		log.Fatalf("Could not set stdout terminal size for command %v: %v\n", cmd.Args, err)
 	}
 
-	out.stderrPty, stderrTty, err = pty.Open()
+	out.stderrPty, out.stderrTty, err = pty.Open()
 	if err != nil {
 		log.Fatalf("Couldn't open a pty for %v's stderr: %v\n", cmd.Args, err)
 	}
@@ -173,16 +181,16 @@ func runInteractive(cmd *exec.Cmd) *Output {
 		}
 	}()
 
-	cmd.Stdin = stdoutTty
-	cmd.Stdout = stdoutTty
-	cmd.Stderr = stderrTty
+	cmd.Stdin = out.stdoutTty
+	cmd.Stdout = out.stdoutTty
+	cmd.Stderr = out.stderrTty
 
 	err = cmd.Start()
 	if err != nil {
 		log.Fatalf("Could not start process %v: %v\n", cmd.Args, err)
 	}
 
-	//out.streamClosed = make(chan struct{}, 2)
+	out.streamClosed = make(chan struct{}, 2)
 	go readContinuouslyTo(out.stdoutPty, out, syscall.Stdout)
 	go readContinuouslyTo(out.stderrPty, out, syscall.Stderr)
 
@@ -190,14 +198,15 @@ func runInteractive(cmd *exec.Cmd) *Output {
 }
 
 func runNonInteractive(cmd *exec.Cmd) *Output {
+	var err error
 	out := &Output{}
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	out.stdoutNoninteractivePipe, err = cmd.StdoutPipe()
 	if err != nil {
 		log.Fatalf("Could not create a pipe for %v's stdout: %v\n", cmd.Args, err)
 	}
 
-	stderrPipe, err := cmd.StderrPipe()
+	out.stderrNoninteractivePipe, err = cmd.StderrPipe()
 	if err != nil {
 		log.Fatalf("Could not create a pipe for %v's stderr: %v\n", cmd.Args, err)
 	}
@@ -207,9 +216,9 @@ func runNonInteractive(cmd *exec.Cmd) *Output {
 		log.Fatalf("Could not start process %v: %v\n", cmd.Args, err)
 	}
 
-	//out.streamClosed = make(chan struct{}, 2)
-	go readContinuouslyTo(stdoutPipe, out, syscall.Stdout)
-	go readContinuouslyTo(stderrPipe, out, syscall.Stderr)
+	out.streamClosed = make(chan struct{}, 2)
+	go readContinuouslyTo(out.stdoutNoninteractivePipe, out, syscall.Stdout)
+	go readContinuouslyTo(out.stderrNoninteractivePipe, out, syscall.Stderr)
 
 	return out
 }
