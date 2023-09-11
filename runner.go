@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alessio/shellescape"
 	"github.com/creack/pty"
 	"github.com/shirou/gopsutil/v3/process"
 )
@@ -25,17 +26,13 @@ type OutputPart struct {
 }
 
 type Output struct {
-	mutex                    sync.Mutex
-	shouldPassToParent       bool
-	parts                    []OutputPart
-	stdoutPty                *os.File
-	stderrPty                *os.File
-	stdoutTty                *os.File
-	stderrTty                *os.File
-	stdoutNoninteractivePipe io.ReadCloser
-	stderrNoninteractivePipe io.ReadCloser
-	winchSignal              chan os.Signal
-	streamClosed             chan struct{}
+	mutex              sync.Mutex
+	shouldPassToParent bool
+	parts              []OutputPart
+	stdoutPipeOrPty    *os.File
+	stderrPipeOrPty    *os.File
+	winchSignal        chan os.Signal
+	streamClosed       chan struct{}
 }
 
 type ProcessResult struct {
@@ -63,19 +60,16 @@ func (proc ProcessResult) wait() error {
 
 	signal.Stop(proc.output.winchSignal)
 
-	// if running in non-interactive mode, Go's exec#Wait() will close pipes for us
-	// as they are created with .StdoutPipe() and .StderrPipe()
-	if stdoutIsTty {
-		// this looks weird but makes stream closing a bit faster
-		_, _ = proc.output.stdoutPty.Write([]byte{})
-		_, _ = proc.output.stderrPty.Write([]byte{})
+	// I wonder if this actually does anything, but it doesn't seem like it would hurt
+	_ = proc.output.stdoutPipeOrPty.Sync()
+	_ = proc.output.stderrPipeOrPty.Sync()
 
-		_ = proc.output.stdoutPty.Close()
-		_ = proc.output.stderrPty.Close()
+	// this looks weird but makes stream closing a bit faster
+	_, _ = proc.output.stdoutPipeOrPty.Write([]byte{})
+	_, _ = proc.output.stderrPipeOrPty.Write([]byte{})
 
-		_ = proc.output.stdoutTty.Close()
-		_ = proc.output.stderrTty.Close()
-	}
+	haveToClose("the read side of the stdout pipe", proc.output.stdoutPipeOrPty)
+	haveToClose("the read side of the stderr pipe", proc.output.stderrPipeOrPty)
 
 	// wait for both stdout and stderr
 	<-proc.output.streamClosed
@@ -128,28 +122,38 @@ func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
 	out.streamClosed <- struct{}{}
 }
 
+func haveToClose(name string, closer io.Closer) {
+	err := closer.Close()
+	if err != nil {
+		log.Fatalf("Could not close %s: %v\n", name, err)
+	}
+}
+
 func runInteractive(cmd *exec.Cmd) *Output {
 	out := &Output{}
+	var stdoutTty, stderrTty *os.File
 
 	size, err := pty.GetsizeFull(os.Stdout)
 	if err != nil {
 		log.Fatalf("Could not get terminal size: %v\n", err)
 	}
 
-	out.stdoutPty, out.stdoutTty, err = pty.Open()
+	out.stdoutPipeOrPty, stdoutTty, err = pty.Open()
 	if err != nil {
 		log.Fatalf("Couldn't open a pty for %v's stdout: %v\n", cmd.Args, err)
 	}
-	err = pty.Setsize(out.stdoutPty, size)
+	defer haveToClose("stdout tty", stdoutTty)
+	err = pty.Setsize(out.stdoutPipeOrPty, size)
 	if err != nil {
 		log.Fatalf("Could not set stdout terminal size for command %v: %v\n", cmd.Args, err)
 	}
 
-	out.stderrPty, out.stderrTty, err = pty.Open()
+	out.stderrPipeOrPty, stderrTty, err = pty.Open()
 	if err != nil {
 		log.Fatalf("Couldn't open a pty for %v's stderr: %v\n", cmd.Args, err)
 	}
-	err = pty.Setsize(out.stderrPty, size)
+	defer haveToClose("stderr tty", stderrTty)
+	err = pty.Setsize(out.stderrPipeOrPty, size)
 	if err != nil {
 		log.Fatalf("Could not set stderr terminal size for command %v: %v\n", cmd.Args, err)
 	}
@@ -169,56 +173,61 @@ func runInteractive(cmd *exec.Cmd) *Output {
 				log.Fatalf("Could not get terminal size on sigwinch: %v\n", err)
 			}
 
-			err = pty.Setsize(out.stdoutPty, size)
+			err = pty.Setsize(out.stdoutPipeOrPty, size)
 			if err != nil {
 				log.Fatalf("Could not set stdout terminal size for command %v on sigwinch: %v\n", cmd.Args, err)
 			}
 
-			err = pty.Setsize(out.stderrPty, size)
+			err = pty.Setsize(out.stderrPipeOrPty, size)
 			if err != nil {
 				log.Fatalf("Could not set stderr terminal size for command %v on sigwinch: %v\n", cmd.Args, err)
 			}
 		}
 	}()
 
-	cmd.Stdin = out.stdoutTty
-	cmd.Stdout = out.stdoutTty
-	cmd.Stderr = out.stderrTty
+	cmd.Stdin = stdoutTty
+	cmd.Stdout = stdoutTty
+	cmd.Stderr = stderrTty
 
 	err = cmd.Start()
 	if err != nil {
-		log.Fatalf("Could not start process %v: %v\n", cmd.Args, err)
+		log.Fatalf("Could not start %v: %v\n", shellescape.QuoteCommand(cmd.Args), err)
 	}
 
 	out.streamClosed = make(chan struct{}, 2)
-	go readContinuouslyTo(out.stdoutPty, out, syscall.Stdout)
-	go readContinuouslyTo(out.stderrPty, out, syscall.Stderr)
+	go readContinuouslyTo(out.stdoutPipeOrPty, out, syscall.Stdout)
+	go readContinuouslyTo(out.stderrPipeOrPty, out, syscall.Stderr)
 
 	return out
 }
 
 func runNonInteractive(cmd *exec.Cmd) *Output {
 	var err error
+	var stdoutWritePipe, stderrWritePipe *os.File
 	out := &Output{}
 
-	out.stdoutNoninteractivePipe, err = cmd.StdoutPipe()
+	out.stdoutPipeOrPty, stdoutWritePipe, err = os.Pipe()
 	if err != nil {
 		log.Fatalf("Could not create a pipe for %v's stdout: %v\n", cmd.Args, err)
 	}
+	defer haveToClose("stdout pipe", stdoutWritePipe)
 
-	out.stderrNoninteractivePipe, err = cmd.StderrPipe()
+	out.stderrPipeOrPty, stderrWritePipe, err = os.Pipe()
 	if err != nil {
 		log.Fatalf("Could not create a pipe for %v's stderr: %v\n", cmd.Args, err)
 	}
+	defer haveToClose("stderr pipe", stderrWritePipe)
 
+	cmd.Stdout = stdoutWritePipe
+	cmd.Stderr = stderrWritePipe
 	err = cmd.Start()
 	if err != nil {
-		log.Fatalf("Could not start process %v: %v\n", cmd.Args, err)
+		log.Fatalf("Could not start %v: %v\n", shellescape.QuoteCommand(cmd.Args), err)
 	}
 
 	out.streamClosed = make(chan struct{}, 2)
-	go readContinuouslyTo(out.stdoutNoninteractivePipe, out, syscall.Stdout)
-	go readContinuouslyTo(out.stderrNoninteractivePipe, out, syscall.Stderr)
+	go readContinuouslyTo(out.stdoutPipeOrPty, out, syscall.Stdout)
+	go readContinuouslyTo(out.stderrPipeOrPty, out, syscall.Stderr)
 
 	return out
 }

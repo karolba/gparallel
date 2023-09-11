@@ -198,7 +198,7 @@ func start(args Args) (exitCode int) {
 				_, _ = fmt.Fprintf(os.Stderr, bold("+ %s")+"\n", quotedCommand)
 			} else if !processResult.isAlive() {
 				_, _ = fmt.Fprintf(os.Stderr,
-					bold("+ %s")+yellow(" (already finished)")+"\n",
+					bold("+ %s")+yellow(" (already finished, reporting saved output)")+"\n",
 					quotedCommand)
 			} else if -time.Until(processResult.startedAt) > 1*time.Second {
 				_, _ = fmt.Fprintf(os.Stderr,
@@ -228,7 +228,7 @@ func start(args Args) (exitCode int) {
 }
 
 func main() {
-	log.SetFlags(log.Lshortfile)
+	log.SetFlags(0)
 	log.SetPrefix(fmt.Sprintf("%s: ", os.Args[0]))
 
 	tryToIncreaseNoFile()
