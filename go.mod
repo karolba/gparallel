@@ -11,6 +11,7 @@ require (
 	github.com/shirou/gopsutil/v3 v3.23.8
 	github.com/spf13/pflag v1.0.5
 	golang.org/x/term v0.12.0
+	modernc.org/memory v1.7.1
 )
 
 require (
@@ -23,5 +24,4 @@ require (
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.3 // indirect
 	golang.org/x/sys v0.12.0 // indirect
-	modernc.org/memory v1.7.1 // indirect
 )

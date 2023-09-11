@@ -5,7 +5,10 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
+	"strings"
 
+	memoryStats "github.com/pbnjay/memory"
 	flag "github.com/spf13/pflag"
 )
 
@@ -19,7 +22,9 @@ var (
 	flVerbose          = flag.BoolP("verbose", "v", false, "print the full command line before each execution")
 	flTemplate         = flag.StringP("replacement", "I", "{}", "the `replacement` string")
 	flKeepGoingOnError = flag.Bool("keep-going-on-error", false, "don't exit on error, keep going")
-	flMaxProcesses     = flag.IntP("max-concurrent", "P", runtime.NumCPU(), "how many concurrent `children` to execute at once at maximum (defaults to the amount of cores)")
+	flMaxProcesses     = flag.IntP("max-concurrent", "P", min(runtime.NumCPU(), 2), "how many concurrent `children` to execute at once at maximum (default based on the amount of cores)")
+	flMaxMemory        = flag.String("max-mem", "5%", "how much system `memory` can be used for storing command outputs before we start blocking. Set to 'inf' to disable the limit.")
+	parsedFlMaxMemory  int64
 )
 
 func usage() {
@@ -33,6 +38,8 @@ func parseArgs() Args {
 	flag.Usage = usage
 	flag.SetInterspersed(false)
 	flag.Parse()
+
+	parsedFlMaxMemory = maxMemoryFromFlag()
 
 	args := flag.Args()
 
@@ -54,4 +61,30 @@ func parseArgs() Args {
 			hasTripleColon: true,
 		}
 	}
+}
+
+func maxMemoryFromFlag() int64 {
+	totalMemory := memoryStats.TotalMemory()
+
+	if *flMaxMemory == "inf" {
+		return int64(totalMemory)
+	}
+
+	if !strings.HasSuffix(*flMaxMemory, "%") {
+		_, _ = fmt.Fprintf(os.Stderr, "%s: Error: the [--max-mem memory] flag only accepts 'number%%' and 'inf' as values, but got '%s'\n", os.Args[0], *flMaxMemory)
+		usage()
+	}
+
+	percentage, err := strconv.ParseFloat(strings.TrimSuffix(*flMaxMemory, "%"), 64)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%s: Invalid value of the --max-mem flag: %v\n", os.Args[0], err)
+		usage()
+	}
+
+	if percentage < 0 {
+		_, _ = fmt.Fprintf(os.Stderr, "%s: Invalid value of the --max-mem flag - the value cannot be negative\n", os.Args[0])
+		usage()
+	}
+
+	return int64(float64(totalMemory) * percentage / 100.0)
 }

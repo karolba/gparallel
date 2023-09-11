@@ -9,7 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -23,8 +23,6 @@ import (
 	"golang.org/x/term"
 )
 
-var args Args
-
 var noLongerSpawnChildren = atomic.Bool{}
 
 var bold = color.New(color.Bold).SprintFunc()
@@ -35,27 +33,36 @@ var stdoutIsTty = isatty.IsTerminal(uintptr(syscall.Stdout))
 func writeOut(out *Output) {
 	var clearedOutBytes int64
 
-	var offset int
-	for chunk, ok := out.nextChunk(&offset); ok; {
+	offset := 0
+	for {
+		chunk, ok := out.nextChunk(&offset)
+		if !ok {
+			break
+		}
+
+		if len(chunk) == 0 {
+			log.Panicf("Got an empty chunk from output: %+v\n", out)
+		}
+
 		fd, content := chunk[0], chunk[1:]
 		_, _ = syscall.Write(int(fd), content)
 
-		clearedOutBytes += int64(len(content))
+		clearedOutBytes += chunkSizeWithHeader(content)
 	}
 
 	out.allocator.mustFree(out.parts)
-	out.parts = nil
 	out.allocator.mustClose()
+	out.parts = nil
 
-	// just freed a bit of memory, so let's hope running a gc cycle does something
-	runtime.GC()
+	// Just deallocated a lot due to a child process dying, let's also hint Go to do the same
+	debug.FreeOSMemory()
 
-	mem.freedMemory.L.Lock()
-	defer mem.freedMemory.L.Unlock()
+	mem.childDiedFreeingMemory.L.Lock()
+	defer mem.childDiedFreeingMemory.L.Unlock()
 
-	mem.currentlyStored.Store(-clearedOutBytes)
+	mem.currentlyStored.Add(-clearedOutBytes)
 	mem.currentlyInTheForeground = out
-	mem.freedMemory.Broadcast()
+	mem.childDiedFreeingMemory.Broadcast()
 }
 
 func toForeground(proc ProcessResult) (exitCode int) {
@@ -202,7 +209,8 @@ func start(args Args) (exitCode int) {
 		}()
 	}
 
-	processes := make(chan ProcessResult, *flMaxProcesses)
+	// TODO: make flMaxProcesses be able to be 1
+	processes := make(chan ProcessResult, *flMaxProcesses-2)
 	if args.hasTripleColon {
 		go startProcessesFromCliArguments(args, processes)
 	} else {
@@ -248,12 +256,14 @@ func start(args Args) (exitCode int) {
 }
 
 func main() {
+	//debug.SetMemoryLimit(int64(memoryStats.TotalMemory() / 10))
+
 	log.SetFlags(0)
 	log.SetPrefix(fmt.Sprintf("%s: ", os.Args[0]))
 
 	tryToIncreaseNoFile()
 
-	args = parseArgs()
+	args := parseArgs()
 
 	exitCode := start(args)
 

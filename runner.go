@@ -89,12 +89,19 @@ func (out *Output) appendOrWrite(buf []byte, dataFromFd int) {
 }
 
 func waitIfUsingTooMuchMemory(willSaveBytes int64, out *Output) {
-	mem.freedMemory.L.Lock()
-	defer mem.freedMemory.L.Unlock()
+	mem.childDiedFreeingMemory.L.Lock()
+	defer mem.childDiedFreeingMemory.L.Unlock()
+
+	if mem.currentlyInTheForeground == out {
+		return
+	}
 
 	mem.currentlyStored.Add(willSaveBytes)
-	for mem.currentlyStored.Load() > mem.max && mem.currentlyInTheForeground != out {
-		mem.freedMemory.Wait()
+	for mem.currentlyStored.Load() > parsedFlMaxMemory {
+		//log.Printf("Blocking because we're storing %d MiB (here: %d)\n",
+		//	mem.currentlyStored.Load()/1024/1024,
+		//	len(out.parts)/1024/1024)
+		mem.childDiedFreeingMemory.Wait()
 	}
 }
 
@@ -105,12 +112,7 @@ func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
 		count, err := stream.Read(buffer)
 
 		if count > 0 {
-			waitIfUsingTooMuchMemory(int64(count), out)
-
-			//data := make([]byte, count)
-			//copy(data, buffer[:count:count])
-
-			//out.appendOrWrite(data, fileDescriptor)
+			waitIfUsingTooMuchMemory(chunkSizeWithHeader(buffer[:count]), out)
 			out.appendOrWrite(buffer[:count], fileDescriptor)
 		}
 
@@ -121,7 +123,13 @@ func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
 			if errors.Is(err, fs.ErrClosed) {
 				break
 			}
-			log.Printf("error from read: %v\n", err)
+			var pathError *os.PathError
+			if errors.As(err, &pathError) && pathError.Err == syscall.EIO {
+				// Returning EIO is Linux's way of saying ErrClosed when reading from a ptmx:
+				// https://github.com/creack/pty/issues/21
+				break
+			}
+			log.Fatalf("error from read: %v\n", err)
 		}
 	}
 
