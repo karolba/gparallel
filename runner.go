@@ -8,12 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/mattn/go-isatty"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 const MAXBUF = 32 * 1024
@@ -39,13 +40,31 @@ type ProcessResult struct {
 	cmd       *exec.Cmd
 }
 
-func (proc ProcessResult) Wait() error {
+func (proc ProcessResult) isAlive() bool {
+	p, err := process.NewProcess(int32(proc.cmd.Process.Pid))
+	if err != nil {
+		return false
+	}
+
+	statuses, err := p.Status()
+	if err != nil {
+		return false
+	}
+
+	return !slices.Contains(statuses, process.Zombie)
+}
+
+func (proc ProcessResult) wait() error {
 	waitError := proc.cmd.Wait()
 
 	signal.Stop(proc.output.winchSignal)
 
 	_ = proc.output.stdoutPty.Sync()
 	_ = proc.output.stderrPty.Sync()
+
+	// todo: write some weird terminal escape sequence to proc.cmd.Stdout and proc.cmd.Stderr
+	//       and wait for it as a close signal
+
 	//_ = proc.output.stdoutPty.Close()
 	//_ = proc.output.stderrPty.Close()
 
@@ -188,6 +207,7 @@ func runNonInteractive(cmd *exec.Cmd) *Output {
 		log.Fatalf("Could not start process %v: %v\n", cmd.Args, err)
 	}
 
+	//out.streamClosed = make(chan struct{}, 2)
 	go readContinuouslyTo(stdoutPipe, out, syscall.Stdout)
 	go readContinuouslyTo(stderrPipe, out, syscall.Stderr)
 
@@ -197,7 +217,7 @@ func runNonInteractive(cmd *exec.Cmd) *Output {
 func run(command []string) (result ProcessResult) {
 	result.cmd = exec.Command(command[0], command[1:]...)
 
-	if isatty.IsTerminal(uintptr(syscall.Stdout)) {
+	if stdoutIsTty {
 		result.output = runInteractive(result.cmd)
 	} else {
 		result.output = runNonInteractive(result.cmd)

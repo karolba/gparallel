@@ -1,25 +1,35 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/alessio/shellescape"
 	"github.com/fatih/color"
+	"github.com/mattn/go-isatty"
 	"golang.org/x/term"
 )
 
 var args Args
 
+var noLongerSpawnChildren = atomic.Bool{}
+
 var bold = color.New(color.Bold).SprintFunc()
 var yellow = color.New(color.FgYellow).SprintFunc()
+
+var stdoutIsTty = isatty.IsTerminal(uintptr(syscall.Stdout))
 
 func writeOut(out *Output) {
 	for _, part := range out.parts {
@@ -34,11 +44,10 @@ func toForeground(proc ProcessResult) (exitCode int) {
 	proc.output.shouldPassToParent = true
 	proc.output.mutex.Unlock()
 
-	err := proc.Wait()
+	err := proc.wait()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		exitCode = exitErr.ExitCode()
-		return
+		return exitErr.ExitCode()
 	}
 	if err != nil {
 		log.Fatal(err)
@@ -56,14 +65,22 @@ func tryToIncreaseNoFile() {
 	_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 }
 
-func waitForChildrenAfterAFailedOne(processes []ProcessResult) {
-	for _, processResult := range processes {
+func waitForChildrenAfterAFailedOne(processes <-chan ProcessResult) {
+	wg := sync.WaitGroup{}
+
+	for processResult := range processes {
+		processResult := processResult
+
 		_ = processResult.cmd.Process.Signal(syscall.SIGTERM)
+
+		wg.Add(1)
+		go func() {
+			_ = processResult.wait()
+			wg.Done()
+		}()
 	}
 
-	for _, processResult := range processes {
-		_ = processResult.Wait()
-	}
+	wg.Wait()
 }
 
 func instantiateCommandString(command []string, argument string) []string {
@@ -90,53 +107,135 @@ func instantiateCommandString(command []string, argument string) []string {
 	}
 }
 
-func main() {
-	originalTermState, _ := term.GetState(syscall.Stdout)
-
-	tryToIncreaseNoFile()
-
-	args = parseArgs()
-
-	exitCode := 0
-
-	processCommands := make([][]string, len(args.data))
-	processes := make([]ProcessResult, len(args.data))
-
-	for i, argument := range args.data {
-		processCommands[i] = instantiateCommandString(slices.Clone(args.command), argument)
+func resetTermStateBeforeExit(originalTermState *term.State) {
+	if originalTermState != nil {
+		err := term.Restore(syscall.Stdout, originalTermState)
+		if err != nil {
+			log.Printf("Warning: could not restore terminal state on exit: %v\n", err)
+		}
 	}
 
-	for i, command := range processCommands {
-		processes[i] = run(command)
+	// additionally, restore the cursor (TODO: and other things) to be visible again just in case it has been hidden
+	if stdoutIsTty {
+		// TODO: restore a bit more.
+
+		fmt.Print("\x1b[?25h") // make the cursor visible
+		fmt.Print("\x1b[?0c")  // restore the cursor to its default shape
+	}
+}
+
+func startProcessesFromCliArguments(args Args, result chan<- ProcessResult) {
+	for _, argument := range args.data {
+		if noLongerSpawnChildren.Load() {
+			break
+		}
+
+		processCommand := instantiateCommandString(slices.Clone(args.command), argument)
+		result <- run(processCommand)
 	}
 
-	for i, processResult := range processes {
+	close(result)
+}
+
+func startProcessesFromStdin(args Args, result chan<- ProcessResult) {
+	stdinReader := bufio.NewReader(os.Stdin)
+
+	for {
+		line, err := stdinReader.ReadString('\n')
+		line = strings.TrimSuffix(line, "\n")
+
+		if len(line) > 0 {
+			processCommand := instantiateCommandString(slices.Clone(args.command), line)
+			result <- run(processCommand)
+		}
+
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			log.Fatalf("Failed reading: %v\n", err)
+		}
+	}
+
+	close(result)
+}
+
+func start(args Args) (exitCode int) {
+	var originalTermState *term.State
+	var err error
+
+	if stdoutIsTty {
+		originalTermState, err = term.GetState(syscall.Stdout)
+		if err != nil {
+			log.Printf("Warning: could get terminal state for stdout: %v\n", err)
+		}
+	}
+
+	if originalTermState != nil {
+		defer resetTermStateBeforeExit(originalTermState)
+
+		signalledToExit := make(chan os.Signal, 1)
+		signal.Notify(signalledToExit, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-signalledToExit
+			resetTermStateBeforeExit(originalTermState)
+			os.Exit(1)
+		}()
+	}
+
+	processes := make(chan ProcessResult, *flMaxProcesses)
+	if args.hasTripleColon {
+		go startProcessesFromCliArguments(args, processes)
+	} else {
+		go startProcessesFromStdin(args, processes)
+	}
+
+	firstProcess := true
+	for processResult := range processes {
 		if *flVerbose {
-			quotedCommand := shellescape.QuoteCommand(processCommands[i])
+			quotedCommand := shellescape.QuoteCommand(processResult.cmd.Args)
 
-			if i == 0 {
+			if firstProcess || !stdoutIsTty {
 				_, _ = fmt.Fprintf(os.Stderr, bold("+ %s")+"\n", quotedCommand)
-			} else {
+			} else if !processResult.isAlive() {
 				_, _ = fmt.Fprintf(os.Stderr,
-					bold("+ %s")+yellow(" (started %v ago, continuing output)")+"\n",
+					bold("+ %s")+yellow(" (already finished)")+"\n",
+					quotedCommand)
+			} else if -time.Until(processResult.startedAt) > 1*time.Second {
+				_, _ = fmt.Fprintf(os.Stderr,
+					bold("+ %s")+yellow(" (resumed output, already runnning for %v)")+"\n",
 					quotedCommand,
-					-time.Until(processResult.startedAt))
+					-time.Until(processResult.startedAt).Round(time.Second))
+			} else {
+				_, _ = fmt.Fprintf(os.Stderr, bold("+ %s")+"\n", quotedCommand)
 			}
 		}
 
 		exitCode = max(exitCode, toForeground(processResult))
 
 		if !*flKeepGoingOnError {
-			if exitCode != 0 && i < len(processes)-1 {
-				waitForChildrenAfterAFailedOne(processes[i+1:])
+			if exitCode != 0 {
+				noLongerSpawnChildren.Store(true)
+
+				waitForChildrenAfterAFailedOne(processes)
 				break
 			}
 		}
+
+		firstProcess = false
 	}
 
-	if originalTermState != nil {
-		_ = term.Restore(syscall.Stdout, originalTermState)
-	}
+	return exitCode
+}
+
+func main() {
+	log.SetFlags(log.Lshortfile)
+	log.SetPrefix(fmt.Sprintf("%s: ", os.Args[0]))
+
+	tryToIncreaseNoFile()
+
+	args = parseArgs()
+
+	exitCode := start(args)
 
 	os.Exit(exitCode)
 }
