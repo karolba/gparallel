@@ -22,7 +22,7 @@ var (
 	flVerbose          = flag.BoolP("verbose", "v", false, "print the full command line before each execution")
 	flTemplate         = flag.StringP("replacement", "I", "{}", "the `replacement` string")
 	flKeepGoingOnError = flag.Bool("keep-going-on-error", false, "don't exit on error, keep going")
-	flMaxProcesses     = flag.IntP("max-concurrent", "P", min(runtime.NumCPU(), 2), "how many concurrent `children` to execute at once at maximum (default based on the amount of cores)")
+	flMaxProcesses     = flag.IntP("max-concurrent", "P", max(runtime.NumCPU(), 2), "how many concurrent `children` to execute at once at maximum (default based on the amount of cores)")
 	flMaxMemory        = flag.String("max-mem", "5%", "how much system `memory` can be used for storing command outputs before we start blocking. Set to 'inf' to disable the limit.")
 	parsedFlMaxMemory  int64
 )
@@ -85,6 +85,9 @@ func maxMemoryFromFlag() int64 {
 		_, _ = fmt.Fprintf(os.Stderr, "%s: Invalid value of the --max-mem flag - the value cannot be negative\n", os.Args[0])
 		usage()
 	}
+
+	// decrease by a little bit to cover for Go's overhead
+	percentage *= 0.98
 
 	return int64(float64(totalMemory) * percentage / 100.0)
 }

@@ -56,10 +56,6 @@ func (proc ProcessResult) wait() error {
 
 	signal.Stop(proc.output.winchSignal)
 
-	// I wonder if this actually does anything, but it doesn't seem like it would hurt
-	_ = proc.output.stdoutPipeOrPty.Sync()
-	_ = proc.output.stderrPipeOrPty.Sync()
-
 	// this looks weird but makes stream closing a bit faster
 	_, _ = proc.output.stdoutPipeOrPty.Write([]byte{})
 	_, _ = proc.output.stderrPipeOrPty.Write([]byte{})
@@ -79,7 +75,7 @@ func (out *Output) appendOrWrite(buf []byte, dataFromFd int) {
 	defer out.partsMutex.Unlock()
 
 	if out.shouldPassToParent {
-		_, err := syscall.Write(dataFromFd, buf)
+		_, err := standardFdToFile[dataFromFd].Write(buf)
 		if err != nil {
 			log.Fatalf("Syscall write to fd %d: %v\n", dataFromFd, err)
 		}

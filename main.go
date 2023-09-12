@@ -23,6 +23,12 @@ import (
 	"golang.org/x/term"
 )
 
+var standardFdToFile = []*os.File{
+	0: os.Stdin,
+	1: os.Stdout,
+	2: os.Stderr,
+}
+
 var noLongerSpawnChildren = atomic.Bool{}
 
 var bold = color.New(color.Bold).SprintFunc()
@@ -45,7 +51,7 @@ func writeOut(out *Output) {
 		}
 
 		fd, content := chunk[0], chunk[1:]
-		_, _ = syscall.Write(int(fd), content)
+		_, _ = standardFdToFile[fd].Write(content)
 
 		clearedOutBytes += chunkSizeWithHeader(content)
 	}
@@ -256,8 +262,6 @@ func start(args Args) (exitCode int) {
 }
 
 func main() {
-	//debug.SetMemoryLimit(int64(memoryStats.TotalMemory() / 10))
-
 	log.SetFlags(0)
 	log.SetPrefix(fmt.Sprintf("%s: ", os.Args[0]))
 
