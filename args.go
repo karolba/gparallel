@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ type Args struct {
 }
 
 var (
+	flVersion          = flag.Bool("version", false, "Show program version")
 	flVerbose          = flag.BoolP("verbose", "v", false, "print the full command line before each execution")
 	flTemplate         = flag.StringP("replacement", "I", "{}", "the `replacement` string")
 	flKeepGoingOnError = flag.Bool("keep-going-on-error", false, "don't exit on error, keep going")
@@ -26,6 +28,40 @@ var (
 	flMaxMemory        = flag.String("max-mem", "5%", "how much system `memory` can be used for storing command outputs before we start blocking. Set to 'inf' to disable the limit.")
 	parsedFlMaxMemory  int64
 )
+
+func showVersion() {
+	buildInfo, ok := debug.ReadBuildInfo()
+	if !ok {
+		_, _ = fmt.Println("gparallel - version unknown")
+		return
+	}
+
+	vcs, revision, modified := "", "(unknown)", false
+	for _, setting := range buildInfo.Settings {
+		switch setting.Key {
+		case "vcs":
+			vcs = setting.Value
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+
+	if len(revision) == 40 {
+		// if we have a long hash, get the shorter one
+		revision = revision[0:7]
+	}
+
+	gitRev := ""
+	if vcs == "git" && !modified {
+		gitRev = fmt.Sprintf(", git rev: %s", revision)
+	} else if vcs == "git" && modified {
+		gitRev = fmt.Sprintf(", git rev: %s (with local changes)", revision)
+	}
+
+	_, _ = fmt.Printf("gparallel %s%s, %s\n", buildInfo.Main.Version, gitRev, buildInfo.GoVersion)
+}
 
 func usage() {
 	_, _ = fmt.Fprintf(os.Stderr, "Usage: %s [-v] [-P proc] [-I replacement] command [arguments] ::: arguments\n", os.Args[0])
@@ -38,6 +74,11 @@ func parseArgs() Args {
 	flag.Usage = usage
 	flag.SetInterspersed(false)
 	flag.Parse()
+
+	if *flVersion {
+		showVersion()
+		os.Exit(0)
+	}
 
 	parsedFlMaxMemory = maxMemoryFromFlag()
 
