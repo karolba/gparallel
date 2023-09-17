@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -14,8 +15,9 @@ import (
 	"time"
 
 	"github.com/alessio/shellescape"
-	"github.com/creack/pty"
+	ptyPkg "github.com/creack/pty"
 	"github.com/shirou/gopsutil/v3/process"
+	"golang.org/x/sys/unix"
 )
 
 const MAXBUF = 32 * 1024
@@ -139,34 +141,72 @@ func haveToClose(name string, closer io.Closer) {
 	}
 }
 
+// createPty creates a pty, resizes it to winSize and marks it async
+// so go doesn't schedule a thread for every read
+func createPty(winSize *ptyPkg.Winsize) (pty, tty *os.File, err error) {
+	pty, tty, err = ptyPkg.Open()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = pty.Close()
+			_ = tty.Close()
+		}
+	}()
+
+	err = ptyPkg.Setsize(pty, winSize)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not set terminal size: %w", err)
+	}
+
+	err = unix.SetNonblock(int(pty.Fd()), true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not set pty fd as nonblocking: %w", err)
+	}
+
+	// the pty package opens /dev/ptmx without O_NONBLOCK. This makes go spawn a lot of threads
+	// when reading from lots of ptys in goroutines. Let's work around that by duping the file desctiptor
+	// into a new one, and creating a new *os.File object with a new async fd
+	asyncPtyFd, err := unix.FcntlInt(pty.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not dup pty fd (number %v): %w", pty.Fd(), err)
+	}
+	defer haveToClose("synchronous /dev/ptmx", pty)
+	defer func() {
+		if err != nil {
+			_ = unix.Close(asyncPtyFd)
+		}
+	}()
+
+	err = unix.SetNonblock(asyncPtyFd, true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not set O_NONBLOCK to file descriptor %v duped from /dev/ptmx: %w", asyncPtyFd, err)
+	}
+
+	return os.NewFile(uintptr(asyncPtyFd), "nonblocking /dev/ptmx"), tty, err
+}
+
 func runInteractive(cmd *exec.Cmd) *Output {
 	out := &Output{}
 	var stdoutTty, stderrTty *os.File
 
-	size, err := pty.GetsizeFull(os.Stdout)
+	size, err := ptyPkg.GetsizeFull(os.Stdout)
 	if err != nil {
 		log.Fatalf("Could not get terminal size: %v\n", err)
 	}
 
-	out.stdoutPipeOrPty, stdoutTty, err = pty.Open()
+	out.stdoutPipeOrPty, stdoutTty, err = createPty(size)
 	if err != nil {
-		log.Fatalf("Couldn't open a pty for %v's stdout: %v\n", cmd.Args, err)
+		log.Fatalf("Couldn't create a pty for %v's stdout: %v\n", cmd.Args, err)
 	}
 	defer haveToClose("stdout tty", stdoutTty)
-	err = pty.Setsize(out.stdoutPipeOrPty, size)
-	if err != nil {
-		log.Fatalf("Could not set stdout terminal size for command %v: %v\n", cmd.Args, err)
-	}
 
-	out.stderrPipeOrPty, stderrTty, err = pty.Open()
+	out.stderrPipeOrPty, stderrTty, err = createPty(size)
 	if err != nil {
-		log.Fatalf("Couldn't open a pty for %v's stderr: %v\n", cmd.Args, err)
+		log.Fatalf("Couldn't create a pty for %v's stderr: %v\n", cmd.Args, err)
 	}
 	defer haveToClose("stderr tty", stderrTty)
-	err = pty.Setsize(out.stderrPipeOrPty, size)
-	if err != nil {
-		log.Fatalf("Could not set stderr terminal size for command %v: %v\n", cmd.Args, err)
-	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid:  true,
@@ -178,17 +218,19 @@ func runInteractive(cmd *exec.Cmd) *Output {
 	signal.Notify(out.winchSignal, syscall.SIGWINCH)
 	go func() {
 		for range out.winchSignal {
-			size, err := pty.GetsizeFull(os.Stdout)
+			// TODO: this should handle just one of stderr/stdout being closed
+
+			size, err := ptyPkg.GetsizeFull(os.Stdout)
 			if err != nil {
 				log.Fatalf("Could not get terminal size on sigwinch: %v\n", err)
 			}
 
-			err = pty.Setsize(out.stdoutPipeOrPty, size)
+			err = ptyPkg.Setsize(out.stdoutPipeOrPty, size)
 			if err != nil {
 				log.Fatalf("Could not set stdout terminal size for command %v on sigwinch: %v\n", cmd.Args, err)
 			}
 
-			err = pty.Setsize(out.stderrPipeOrPty, size)
+			err = ptyPkg.Setsize(out.stderrPipeOrPty, size)
 			if err != nil {
 				log.Fatalf("Could not set stderr terminal size for command %v on sigwinch: %v\n", cmd.Args, err)
 			}
