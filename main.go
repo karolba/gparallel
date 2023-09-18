@@ -61,14 +61,11 @@ var stdoutAndStderrAreTheSame = func() bool {
 		return false
 	}
 
-	theyAre := stdout.Dev == stderr.Dev &&
+	return stdout.Dev == stderr.Dev &&
 		stdout.Ino == stderr.Ino &&
 		stdout.Mode == stderr.Mode &&
 		stdout.Nlink == stderr.Nlink &&
 		stdout.Rdev == stderr.Rdev
-
-	println("Are stdout and stderr the same:", theyAre)
-	return theyAre
 }()
 
 func writeOut(out *Output) {
@@ -188,8 +185,7 @@ func startProcessesFromCliArguments(args Args, result chan<- ProcessResult) {
 			break
 		}
 
-		processCommand := instantiateCommandString(slices.Clone(args.command), argument)
-		result <- run(processCommand)
+		result <- run(instantiateCommandString(slices.Clone(args.command), argument))
 	}
 
 	close(result)
@@ -203,8 +199,7 @@ func startProcessesFromStdin(args Args, result chan<- ProcessResult) {
 		line = strings.TrimSuffix(line, "\n")
 
 		if len(line) > 0 {
-			processCommand := instantiateCommandString(slices.Clone(args.command), line)
-			result <- run(processCommand)
+			result <- run(instantiateCommandString(slices.Clone(args.command), line))
 		}
 
 		if err == io.EOF {
