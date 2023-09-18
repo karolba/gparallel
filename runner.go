@@ -54,20 +54,15 @@ func (proc ProcessResult) isAlive() bool {
 }
 
 func (proc ProcessResult) wait() error {
+	// wait for both stdout and stderr if we opened two readers
+	<-proc.output.streamClosed
+	if !stdoutAndStderrAreTheSame {
+		<-proc.output.streamClosed
+	}
+
 	waitError := proc.cmd.Wait()
 
 	signal.Stop(proc.output.winchSignal)
-
-	// this looks weird but makes stream closing a bit faster
-	_, _ = proc.output.stdoutPipeOrPty.Write([]byte{})
-	_, _ = proc.output.stderrPipeOrPty.Write([]byte{})
-
-	haveToClose("the read side of the stdout pipe", proc.output.stdoutPipeOrPty)
-	haveToClose("the read side of the stderr pipe", proc.output.stderrPipeOrPty)
-
-	// wait for both stdout and stderr
-	<-proc.output.streamClosed
-	<-proc.output.streamClosed
 
 	return waitError
 }
@@ -103,7 +98,7 @@ func waitIfUsingTooMuchMemory(willSaveBytes int64, out *Output) {
 	}
 }
 
-func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
+func readContinuouslyTo(stream io.ReadCloser, out *Output, fileDescriptor int) {
 	buffer := make([]byte, MAXBUF)
 
 	for {
@@ -116,6 +111,7 @@ func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
 
 		if err != nil {
 			if err == io.EOF {
+				haveToClose("child stdout/stderr after EOF", stream)
 				break
 			}
 			if errors.Is(err, fs.ErrClosed) {
@@ -123,8 +119,9 @@ func readContinuouslyTo(stream io.Reader, out *Output, fileDescriptor int) {
 			}
 			var pathError *os.PathError
 			if errors.As(err, &pathError) && pathError.Err == syscall.EIO {
-				// Returning EIO is Linux's way of saying ErrClosed when reading from a ptmx:
+				// Returning EIO is Linux's way of saying the other end is closed when reading from a ptmx:
 				// https://github.com/creack/pty/issues/21
+				haveToClose("child stdout/stderr after EIO", stream)
 				break
 			}
 			log.Fatalf("error from read: %v\n", err)
@@ -188,6 +185,12 @@ func createPty(winSize *ptyPkg.Winsize) (pty, tty *os.File, err error) {
 }
 
 func runInteractive(cmd *exec.Cmd) *Output {
+	cmd.Env = os.Environ()
+	if originalGoMaxProcs, exists := os.LookupEnv("GOMAXPROCS"); exists {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("_GPARALLEL_ORIGINAL_GOMAXPROCS=%s", originalGoMaxProcs))
+	}
+	cmd.Env = append(cmd.Env, "GOMAXPROCS=1")
+
 	out := &Output{}
 	var stdoutTty, stderrTty *os.File
 
@@ -202,11 +205,15 @@ func runInteractive(cmd *exec.Cmd) *Output {
 	}
 	defer haveToClose("stdout tty", stdoutTty)
 
-	out.stderrPipeOrPty, stderrTty, err = createPty(size)
-	if err != nil {
-		log.Fatalf("Couldn't create a pty for %v's stderr: %v\n", cmd.Args, err)
+	if stdoutAndStderrAreTheSame {
+		out.stderrPipeOrPty, stderrTty = out.stdoutPipeOrPty, stdoutTty
+	} else {
+		out.stderrPipeOrPty, stderrTty, err = createPty(size)
+		if err != nil {
+			log.Fatalf("Couldn't create a pty for %v's stderr: %v\n", cmd.Args, err)
+		}
+		defer haveToClose("stderr tty", stderrTty)
 	}
-	defer haveToClose("stderr tty", stderrTty)
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid:  true,
@@ -225,14 +232,10 @@ func runInteractive(cmd *exec.Cmd) *Output {
 				log.Fatalf("Could not get terminal size on sigwinch: %v\n", err)
 			}
 
-			err = ptyPkg.Setsize(out.stdoutPipeOrPty, size)
-			if err != nil {
-				log.Fatalf("Could not set stdout terminal size for command %v on sigwinch: %v\n", cmd.Args, err)
-			}
+			_ = ptyPkg.Setsize(out.stdoutPipeOrPty, size)
 
-			err = ptyPkg.Setsize(out.stderrPipeOrPty, size)
-			if err != nil {
-				log.Fatalf("Could not set stderr terminal size for command %v on sigwinch: %v\n", cmd.Args, err)
+			if !stdoutAndStderrAreTheSame {
+				_ = ptyPkg.Setsize(out.stderrPipeOrPty, size)
 			}
 		}
 	}()
@@ -243,12 +246,8 @@ func runInteractive(cmd *exec.Cmd) *Output {
 
 	err = cmd.Start()
 	if err != nil {
-		log.Fatalf("Could not start %v: %v\n", shellescape.QuoteCommand(cmd.Args), err)
+		log.Fatalf("Could not start %v: %v\n", shellescape.QuoteCommand(cmd.Args[2:]), err)
 	}
-
-	out.streamClosed = make(chan struct{}, 2)
-	go readContinuouslyTo(out.stdoutPipeOrPty, out, syscall.Stdout)
-	go readContinuouslyTo(out.stderrPipeOrPty, out, syscall.Stderr)
 
 	return out
 }
@@ -264,11 +263,15 @@ func runNonInteractive(cmd *exec.Cmd) *Output {
 	}
 	defer haveToClose("stdout pipe", stdoutWritePipe)
 
-	out.stderrPipeOrPty, stderrWritePipe, err = os.Pipe()
-	if err != nil {
-		log.Fatalf("Could not create a pipe for %v's stderr: %v\n", cmd.Args, err)
+	if stdoutAndStderrAreTheSame {
+		out.stderrPipeOrPty, stderrWritePipe = out.stdoutPipeOrPty, stdoutWritePipe
+	} else {
+		out.stderrPipeOrPty, stderrWritePipe, err = os.Pipe()
+		if err != nil {
+			log.Fatalf("Could not create a pipe for %v's stderr: %v\n", cmd.Args, err)
+		}
+		defer haveToClose("stderr pipe", stderrWritePipe)
 	}
-	defer haveToClose("stderr pipe", stderrWritePipe)
 
 	cmd.Stdout = stdoutWritePipe
 	cmd.Stderr = stderrWritePipe
@@ -277,20 +280,26 @@ func runNonInteractive(cmd *exec.Cmd) *Output {
 		log.Fatalf("Could not start %v: %v\n", shellescape.QuoteCommand(cmd.Args), err)
 	}
 
-	out.streamClosed = make(chan struct{}, 2)
-	go readContinuouslyTo(out.stdoutPipeOrPty, out, syscall.Stdout)
-	go readContinuouslyTo(out.stderrPipeOrPty, out, syscall.Stderr)
-
 	return out
 }
 
 func run(command []string) (result ProcessResult) {
+	if stdoutIsTty {
+		command = append([]string{os.Args[0], "--_execute-and-flush-tty"}, command...)
+	}
+
 	result.cmd = exec.Command(command[0], command[1:]...)
 
 	if stdoutIsTty {
 		result.output = runInteractive(result.cmd)
 	} else {
 		result.output = runNonInteractive(result.cmd)
+	}
+
+	result.output.streamClosed = make(chan struct{}, 2)
+	go readContinuouslyTo(result.output.stdoutPipeOrPty, result.output, syscall.Stdout)
+	if !stdoutAndStderrAreTheSame {
+		go readContinuouslyTo(result.output.stderrPipeOrPty, result.output, syscall.Stderr)
 	}
 
 	result.startedAt = time.Now()

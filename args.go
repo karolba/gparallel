@@ -20,13 +20,15 @@ type Args struct {
 }
 
 var (
-	flVersion          = flag.Bool("version", false, "Show program version")
-	flVerbose          = flag.BoolP("verbose", "v", false, "print the full command line before each execution")
-	flTemplate         = flag.StringP("replacement", "I", "{}", "the `replacement` string")
-	flKeepGoingOnError = flag.Bool("keep-going-on-error", false, "don't exit on error, keep going")
-	flMaxProcesses     = flag.IntP("max-concurrent", "P", max(runtime.NumCPU(), 2), "how many concurrent `children` to execute at once at maximum (default based on the amount of cores)")
-	flMaxMemory        = flag.String("max-mem", "5%", "how much system `memory` can be used for storing command outputs before we start blocking. Set to 'inf' to disable the limit.")
-	parsedFlMaxMemory  int64
+	flFromStdin          = flag.BoolP("from-stdin", "s", false, "Get input from stdin")
+	flVersion            = flag.Bool("version", false, "Show program version")
+	flVerbose            = flag.BoolP("verbose", "v", false, "Print the full command line before each execution")
+	flTemplate           = flag.StringP("replacement", "I", "{}", "The `replacement` string")
+	flKeepGoingOnError   = flag.Bool("keep-going-on-error", false, "Don't exit on error, keep going")
+	flMaxProcesses       = flag.IntP("max-concurrent", "P", max(runtime.NumCPU(), 2), "How many concurrent `children` to execute at once at maximum (default based on the amount of cores)")
+	flMaxMemory          = flag.String("max-mem", "5%", "How much system `memory` can be used for storing command outputs before we start blocking. Set to 'inf' to disable the limit.")
+	flExecuteAndFlushTty = flag.Bool("_execute-and-flush-tty", false, "")
+	parsedFlMaxMemory    int64
 )
 
 func showVersion() {
@@ -64,8 +66,8 @@ func showVersion() {
 }
 
 func usage() {
-	_, _ = fmt.Fprintf(os.Stderr, "Usage: %s [-v] [-P proc] [-I replacement] command [arguments] ::: arguments\n", os.Args[0])
-	_, _ = fmt.Fprintf(os.Stderr, "       %s [-v] [-P proc] [-I replacement] command [arguments] < arguments-in-lines\n\n", os.Args[0])
+	_, _ = fmt.Fprintf(os.Stderr, "Usage: %s    [-v] [-P proc] [-I replacement] command [arguments] ::: arguments\n", os.Args[0])
+	_, _ = fmt.Fprintf(os.Stderr, "       %s -s [-v] [-P proc] [-I replacement] command [arguments] < arguments-in-lines\n\n", os.Args[0])
 	flag.PrintDefaults()
 	os.Exit(1)
 }
@@ -73,6 +75,7 @@ func usage() {
 func parseArgs() Args {
 	flag.Usage = usage
 	flag.SetInterspersed(false)
+	_ = flag.CommandLine.MarkHidden("_execute-and-flush-tty")
 	flag.Parse()
 
 	if *flVersion {
@@ -88,7 +91,20 @@ func parseArgs() Args {
 		usage()
 	}
 
+	if *flExecuteAndFlushTty {
+		return Args{
+			command: args,
+			data:    []string{},
+		}
+	}
+
 	threeColons := slices.Index(args, ":::")
+
+	if !*flFromStdin && threeColons == -1 {
+		_, _ = fmt.Fprintf(os.Stderr, "%s: Error: neither -s (--from-stdin) nor ::: specified in the arguments\n", os.Args[0])
+		usage()
+	}
+
 	if threeColons == -1 {
 		return Args{
 			command:        args,

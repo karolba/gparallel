@@ -8,8 +8,10 @@ require (
 	github.com/fatih/color v1.15.0
 	github.com/mattn/go-isatty v0.0.19
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58
+	github.com/pkg/term v1.2.0-beta.2
 	github.com/shirou/gopsutil/v3 v3.23.8
 	github.com/spf13/pflag v1.0.5
+	golang.org/x/sys v0.12.0
 	golang.org/x/term v0.12.0
 	modernc.org/memory v1.7.1
 )
@@ -23,5 +25,4 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.3 // indirect
-	golang.org/x/sys v0.12.0 // indirect
 )

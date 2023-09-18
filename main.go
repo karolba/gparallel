@@ -20,6 +20,7 @@ import (
 	"github.com/alessio/shellescape"
 	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
+	"github.com/pkg/term/termios"
 	"golang.org/x/term"
 )
 
@@ -35,6 +36,40 @@ var bold = color.New(color.Bold).SprintFunc()
 var yellow = color.New(color.FgYellow).SprintFunc()
 
 var stdoutIsTty = isatty.IsTerminal(uintptr(syscall.Stdout))
+
+// stdoutAndStderrAreTheSame tells us if stdout and stderr point to the same file/pipe/stream, for the sole purpose
+// of conserving pty/tty pairs - which are a very limited resource on most unix systems (linux default max: usually
+// from 512 to 4096, macOS default max: from 127 to 512)
+var stdoutAndStderrAreTheSame = func() bool {
+	stdoutStat, err := os.Stdout.Stat()
+	if err != nil {
+		log.Fatalln("Cannot stat stdout:", err)
+	}
+	stdout, ok := stdoutStat.Sys().(*syscall.Stat_t)
+	if !ok {
+		// We probably aren't on a Unix - assume stdout and stderr are the same
+		return false
+	}
+
+	stderrStat, err := os.Stderr.Stat()
+	if err != nil {
+		log.Fatalln("Cannot stat stderr:", err)
+	}
+	stderr, ok := stderrStat.Sys().(*syscall.Stat_t)
+	if !ok {
+		// We probably aren't on a Unix - assume stdout and stderr are the same
+		return false
+	}
+
+	theyAre := stdout.Dev == stderr.Dev &&
+		stdout.Ino == stderr.Ino &&
+		stdout.Mode == stderr.Mode &&
+		stdout.Nlink == stderr.Nlink &&
+		stdout.Rdev == stderr.Rdev
+
+	println("Are stdout and stderr the same:", theyAre)
+	return theyAre
+}()
 
 func writeOut(out *Output) {
 	var clearedOutBytes int64
@@ -73,10 +108,13 @@ func toForeground(proc ProcessResult) (exitCode int) {
 	proc.output.partsMutex.Unlock()
 
 	err := proc.wait()
+
+	// Check if our child exited unsuccessfully
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode()
 	}
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -212,11 +250,14 @@ func start(args Args) (exitCode int) {
 
 	// TODO: make flMaxProcesses be able to be 1
 	processes := make(chan ProcessResult, *flMaxProcesses-2)
-	if args.hasTripleColon {
-		go startProcessesFromCliArguments(args, processes)
-	} else {
-		go startProcessesFromStdin(args, processes)
-	}
+	go func() {
+		if args.hasTripleColon {
+			startProcessesFromCliArguments(args, processes)
+		}
+		if *flFromStdin {
+			startProcessesFromStdin(args, processes)
+		}
+	}()
 
 	firstProcess := true
 	for processResult := range processes {
@@ -256,13 +297,47 @@ func start(args Args) (exitCode int) {
 	return exitCode
 }
 
+func executeAndFlushTty(proc *exec.Cmd) (exitCode int) {
+	if originalGomaxprocs := os.Getenv("_GPARALLEL_ORIGINAL_GOMAXPROCS"); originalGomaxprocs != "" {
+		_ = os.Unsetenv("_GPARALLEL_ORIGINAL_GOMAXPROCS")
+		_ = os.Setenv("GOMAXPROCS", originalGomaxprocs)
+	} else {
+		_ = os.Unsetenv("GOMAXPROCS")
+	}
+
+	proc.Stdin = os.Stdin
+	proc.Stdout = os.Stdout
+	proc.Stderr = os.Stderr
+	err := proc.Start()
+	if err != nil {
+		log.Fatalf("Could not start process %v, %v\n", shellescape.QuoteCommand(proc.Args), err)
+	}
+	err = proc.Wait()
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		exitCode = exitErr.ExitCode()
+	} else if err != nil {
+		log.Fatalf("Could not wait for process %v, %v\n", shellescape.QuoteCommand(proc.Args), err)
+	}
+
+	_ = termios.Tcdrain(uintptr(syscall.Stdout))
+	_ = termios.Tcdrain(uintptr(syscall.Stderr))
+
+	return exitCode
+}
+
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix(fmt.Sprintf("%s: ", os.Args[0]))
 
-	tryToIncreaseNoFile()
-
 	args := parseArgs()
+
+	if *flExecuteAndFlushTty {
+		os.Exit(executeAndFlushTty(exec.Command(args.command[0], args.command[1:]...)))
+	}
+
+	tryToIncreaseNoFile()
 
 	exitCode := start(args)
 
