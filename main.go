@@ -180,14 +180,6 @@ func resetTermStateBeforeExit(originalTermState *term.State) {
 			log.Printf("Warning: could not restore terminal state on exit: %v\n", err)
 		}
 	}
-
-	// additionally, restore the cursor (TODO: and other things) to be visible again just in case it has been hidden
-	if stdoutIsTty {
-		// TODO: restore a bit more.
-
-		fmt.Print("\x1b[?25h") // make the cursor visible
-		fmt.Print("\x1b[?0c")  // restore the cursor to its default shape
-	}
 }
 
 func startProcessesFromCliArguments(args Args, result chan<- ProcessResult) {
