@@ -85,9 +85,9 @@ func (out *Output) newChunk(chunkSize int) []byte {
 	return chunkWithLengthHeader[chunkHeaderSize:]
 }
 
-func (out *Output) nextChunk(start *int) ([]byte, bool) {
+func (out *Output) getNextChunk(start *int) (fd byte, content []byte, ok bool) {
 	if *start >= len(out.parts) {
-		return nil, false
+		return 0, nil, false
 	}
 
 	chunkSize := int(binary.NativeEndian.Uint32(out.parts[*start:]))
@@ -95,8 +95,12 @@ func (out *Output) nextChunk(start *int) ([]byte, bool) {
 
 	chunk := out.parts[*start : *start+chunkSize]
 
+	if len(chunk) <= 0 {
+		log.Panicf("Got an empty chunk from output: %+v\n", out)
+	}
+
 	*start += chunkSize
-	return chunk, true
+	return chunk[0], chunk[1:], true
 }
 
 func chunkSizeWithHeader(data []byte) (size int64) {

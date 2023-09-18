@@ -41,16 +41,11 @@ func writeOut(out *Output) {
 
 	offset := 0
 	for {
-		chunk, ok := out.nextChunk(&offset)
+		fd, content, ok := out.getNextChunk(&offset)
 		if !ok {
 			break
 		}
 
-		if len(chunk) == 0 {
-			log.Panicf("Got an empty chunk from output: %+v\n", out)
-		}
-
-		fd, content := chunk[0], chunk[1:]
 		_, _ = standardFdToFile[fd].Write(content)
 
 		clearedOutBytes += chunkSizeWithHeader(content)
