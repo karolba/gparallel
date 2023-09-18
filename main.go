@@ -187,8 +187,6 @@ func startProcessesFromCliArguments(args Args, result chan<- ProcessResult) {
 
 		result <- run(instantiateCommandString(slices.Clone(args.command), argument))
 	}
-
-	close(result)
 }
 
 func startProcessesFromStdin(args Args, result chan<- ProcessResult) {
@@ -208,8 +206,6 @@ func startProcessesFromStdin(args Args, result chan<- ProcessResult) {
 			log.Fatalf("Failed reading: %v\n", err)
 		}
 	}
-
-	close(result)
 }
 
 func start(args Args) (exitCode int) {
@@ -244,6 +240,7 @@ func start(args Args) (exitCode int) {
 		if *flFromStdin {
 			startProcessesFromStdin(args, processes)
 		}
+		close(processes)
 	}()
 
 	firstProcess := true
