@@ -196,6 +196,9 @@ func startProcessesFromStdin(args Args, result chan<- ProcessResult) {
 		line, err := stdinReader.ReadString('\n')
 		line = strings.TrimSuffix(line, "\n")
 
+		if noLongerSpawnChildren.Load() {
+			break
+		}
 		if len(line) > 0 {
 			result <- run(instantiateCommandString(slices.Clone(args.command), line))
 		}
@@ -208,7 +211,9 @@ func startProcessesFromStdin(args Args, result chan<- ProcessResult) {
 	}
 }
 
-func start(args Args) (exitCode int) {
+func displaySequentially(processes <-chan ProcessResult) (exitCode int) {
+	tryToIncreaseNoFile()
+
 	var originalTermState *term.State
 	var err error
 
@@ -230,18 +235,6 @@ func start(args Args) (exitCode int) {
 			os.Exit(1)
 		}()
 	}
-
-	// TODO: make flMaxProcesses be able to be 1
-	processes := make(chan ProcessResult, *flMaxProcesses-2)
-	go func() {
-		if args.hasTripleColon {
-			startProcessesFromCliArguments(args, processes)
-		}
-		if *flFromStdin {
-			startProcessesFromStdin(args, processes)
-		}
-		close(processes)
-	}()
 
 	firstProcess := true
 	for processResult := range processes {
@@ -281,7 +274,7 @@ func start(args Args) (exitCode int) {
 	return exitCode
 }
 
-func executeAndFlushTty(proc *exec.Cmd) (exitCode int) {
+func executeAndFlushTty(command []string) (exitCode int) {
 	if originalGomaxprocs := os.Getenv("_GPARALLEL_ORIGINAL_GOMAXPROCS"); originalGomaxprocs != "" {
 		_ = os.Unsetenv("_GPARALLEL_ORIGINAL_GOMAXPROCS")
 		_ = os.Setenv("GOMAXPROCS", originalGomaxprocs)
@@ -289,26 +282,32 @@ func executeAndFlushTty(proc *exec.Cmd) (exitCode int) {
 		_ = os.Unsetenv("GOMAXPROCS")
 	}
 
-	proc.Stdin = os.Stdin
-	proc.Stdout = os.Stdout
-	proc.Stderr = os.Stderr
-	err := proc.Start()
+	path, err := exec.LookPath(command[0])
 	if err != nil {
-		log.Fatalf("Could not start process %v, %v\n", shellescape.QuoteCommand(proc.Args), err)
+		log.Fatalf("Could not find executable %s: %v\n", command[0], err)
 	}
-	err = proc.Wait()
 
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		exitCode = exitErr.ExitCode()
-	} else if err != nil {
-		log.Fatalf("Could not wait for process %v, %v\n", shellescape.QuoteCommand(proc.Args), err)
+	// this process won't be used for anything much more, let's cap memory usage a bit
+	// this reduces memory usage by a couple of megabytes when running a lot of executeAndFlushTtys
+	debug.SetMemoryLimit(0)
+	debug.FreeOSMemory()
+
+	process, err := os.StartProcess(path, command, &os.ProcAttr{
+		Files: standardFdToFile,
+	})
+	if err != nil {
+		log.Fatalf("Could not displaySequentially %s: %v\n", shellescape.QuoteCommand(command), err)
+	}
+
+	processState, err := process.Wait()
+	if err != nil {
+		log.Fatalf("Could not wait for process %v, %v\n", shellescape.QuoteCommand(command), err)
 	}
 
 	_ = termios.Tcdrain(uintptr(syscall.Stdout))
 	_ = termios.Tcdrain(uintptr(syscall.Stderr))
 
-	return exitCode
+	return processState.ExitCode()
 }
 
 func main() {
@@ -317,13 +316,37 @@ func main() {
 
 	args := parseArgs()
 
-	if *flExecuteAndFlushTty {
-		os.Exit(executeAndFlushTty(exec.Command(args.command[0], args.command[1:]...)))
+	switch true {
+	case *flExecuteAndFlushTty:
+		os.Exit(executeAndFlushTty(args.command))
+	case *flQueueCommandAncestor != "":
+		queueCommandForAncestor(args.command, *flQueueCommandAncestor)
+		os.Exit(0)
+	case *flQueueCommandPid != -1:
+		queueCommand(args.command, *flQueueCommandPid)
+		os.Exit(0)
+	case *flQueueCommandParent:
+		queueCommandForParent(args.command)
+		os.Exit(0)
 	}
 
-	tryToIncreaseNoFile()
+	// TODO: make flMaxProcesses be able to be 1
+	processes := make(chan ProcessResult, *flMaxProcesses-2)
+	go func() {
+		defer close(processes)
 
-	exitCode := start(args)
+		if *flQueueWait {
+			startProcessesFromQueue(processes)
+			return
+		}
 
-	os.Exit(exitCode)
+		if args.hasTripleColon {
+			startProcessesFromCliArguments(args, processes)
+		}
+		if *flFromStdin {
+			startProcessesFromStdin(args, processes)
+		}
+	}()
+
+	os.Exit(displaySequentially(processes))
 }

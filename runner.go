@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"slices"
 	"sync"
 	"syscall"
@@ -60,11 +61,9 @@ func (proc ProcessResult) wait() error {
 		<-proc.output.streamClosed
 	}
 
-	waitError := proc.cmd.Wait()
-
 	signal.Stop(proc.output.winchSignal)
 
-	return waitError
+	return proc.cmd.Wait()
 }
 
 func (out *Output) appendOrWrite(buf []byte, dataFromFd int) {
@@ -283,9 +282,26 @@ func runNonInteractive(cmd *exec.Cmd) *Output {
 	return out
 }
 
+// executable behaves like os.Executable(), but doesn't needlessly readlink the path, which is not necessary
+// if we don't care where the executable is located at
+func executable() string {
+	switch runtime.GOOS {
+	case "linux", "android":
+		return "/proc/self/exe"
+	case "netbsd":
+		return "/proc/curproc/exe"
+	default:
+		path, err := os.Executable()
+		if err != nil {
+			log.Fatalln("Could not locate argv[0] location:", err)
+		}
+		return path
+	}
+}
+
 func run(command []string) (result ProcessResult) {
 	if stdoutIsTty {
-		command = append([]string{os.Args[0], "--_execute-and-flush-tty"}, command...)
+		command = append([]string{executable(), "--_execute-and-flush-tty"}, command...)
 	}
 
 	result.cmd = exec.Command(command[0], command[1:]...)
