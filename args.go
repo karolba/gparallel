@@ -19,6 +19,14 @@ type Args struct {
 	hasTripleColon bool
 }
 
+func max(a, b int) int {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
+
 var (
 	flFromStdin            = flag.BoolP("from-stdin", "s", false, "Get input from stdin")
 	flVersion              = flag.Bool("version", false, "Show program version")
