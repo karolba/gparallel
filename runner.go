@@ -35,9 +35,10 @@ type Output struct {
 }
 
 type ProcessResult struct {
-	startedAt time.Time
-	output    *Output
-	cmd       *exec.Cmd
+	startedAt       time.Time
+	output          *Output
+	originalCommand []string
+	cmd             *exec.Cmd
 }
 
 func (proc ProcessResult) isAlive() bool {
@@ -245,6 +246,7 @@ func runInteractive(cmd *exec.Cmd) *Output {
 
 	err = cmd.Start()
 	if err != nil {
+		// TODO: take the :2 only if --_execute-and-flush-tty is used - if not using it is even implemented
 		log.Fatalf("Could not start %v: %v\n", shellescape.QuoteCommand(cmd.Args[2:]), err)
 	}
 
@@ -300,6 +302,7 @@ func executable() string {
 }
 
 func run(command []string) (result ProcessResult) {
+	result.originalCommand = command
 	if stdoutIsTty {
 		command = append([]string{executable(), "--_execute-and-flush-tty"}, command...)
 	}

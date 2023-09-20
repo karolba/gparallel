@@ -239,7 +239,7 @@ func displaySequentially(processes <-chan ProcessResult) (exitCode int) {
 	firstProcess := true
 	for processResult := range processes {
 		if *flVerbose {
-			quotedCommand := shellescape.QuoteCommand(processResult.cmd.Args)
+			quotedCommand := shellescape.QuoteCommand(processResult.originalCommand)
 
 			if firstProcess || !stdoutIsTty {
 				_, _ = fmt.Fprintf(os.Stderr, bold("+ %s")+"\n", quotedCommand)
