@@ -11,6 +11,7 @@ require (
 	github.com/pkg/term v1.2.0-beta.2
 	github.com/shirou/gopsutil/v3 v3.23.8
 	github.com/spf13/pflag v1.0.5
+	golang.org/x/exp v0.0.0-20230905200255-921286631fa9
 	golang.org/x/sys v0.12.0
 	golang.org/x/term v0.12.0
 	modernc.org/memory v1.7.1

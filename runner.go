@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
-	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +17,7 @@ import (
 	"github.com/alessio/shellescape"
 	ptyPkg "github.com/creack/pty"
 	"github.com/shirou/gopsutil/v3/process"
+	"golang.org/x/exp/slices"
 	"golang.org/x/sys/unix"
 )
 

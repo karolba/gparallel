@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime/debug"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +20,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
 	"github.com/pkg/term/termios"
+	"golang.org/x/exp/slices"
 	"golang.org/x/term"
 )
 

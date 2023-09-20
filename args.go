@@ -5,12 +5,12 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
-	"slices"
 	"strconv"
 	"strings"
 
 	memoryStats "github.com/pbnjay/memory"
 	flag "github.com/spf13/pflag"
+	"golang.org/x/exp/slices"
 )
 
 type Args struct {

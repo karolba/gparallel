@@ -80,7 +80,7 @@ func (out *Output) newChunk(chunkSize int) []byte {
 
 	chunkWithLengthHeader := out.parts[lenBefore:lenAfter]
 
-	binary.NativeEndian.PutUint32(chunkWithLengthHeader, uint32(chunkSize))
+	binary.LittleEndian.PutUint32(chunkWithLengthHeader, uint32(chunkSize))
 
 	return chunkWithLengthHeader[chunkHeaderSize:]
 }
@@ -90,7 +90,7 @@ func (out *Output) getNextChunk(start *int) (fd byte, content []byte, ok bool) {
 		return 0, nil, false
 	}
 
-	chunkSize := int(binary.NativeEndian.Uint32(out.parts[*start:]))
+	chunkSize := int(binary.LittleEndian.Uint32(out.parts[*start:]))
 	*start += int(chunkHeaderSize)
 
 	chunk := out.parts[*start : *start+chunkSize]
