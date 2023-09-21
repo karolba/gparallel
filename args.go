@@ -79,8 +79,8 @@ func showVersion() {
 	_, _ = fmt.Printf("gparallel %s%s, %s\n", buildInfo.Main.Version, gitRev, buildInfo.GoVersion)
 }
 
-func countTrue(vals ...bool) (i int) {
-	for _, v := range vals {
+func countTrue(values ...bool) (i int) {
+	for _, v := range values {
 		if v {
 			i += 1
 		}
@@ -96,15 +96,12 @@ func usage() {
 	_, _ = fmt.Fprintf(os.Stderr, "       %s --queue-command-pid pid command [arguments]\n", os.Args[0])
 	_, _ = fmt.Fprintf(os.Stderr, "       %s --queue-command-ancestor process-name command [arguments]\n\n", os.Args[0])
 	flag.PrintDefaults()
-	os.Exit(1)
 }
 
 func parseArgs() Args {
 	flag.Usage = usage
 	flag.SetInterspersed(false)
 	_ = flag.CommandLine.MarkHidden("_execute-and-flush-tty")
-	// This one is not yet implemented:
-	_ = flag.CommandLine.MarkHidden("show-queue")
 	flag.Parse()
 
 	if *flVersion {
@@ -116,7 +113,18 @@ func parseArgs() Args {
 
 	args := flag.Args()
 
-	if len(args) == 0 && !*flQueueWait {
+	flagsPreventingFurtherArguments := countTrue(
+		*flQueueWait,
+		*flShowQueue,
+	)
+
+	exclusiveFlags := flagsPreventingFurtherArguments + countTrue(
+		*flFromStdin,
+		*flExecuteAndFlushTty,
+		*flQueueCommandParent || *flQueueCommandAncestor != "" || *flQueueCommandPid != -1,
+	)
+
+	if len(args) == 0 && flagsPreventingFurtherArguments == 0 {
 		usage()
 	}
 
@@ -125,15 +133,7 @@ func parseArgs() Args {
 		usage()
 	}
 
-	behaviourModifyingFlags := countTrue(
-		*flFromStdin,
-		*flExecuteAndFlushTty,
-		*flQueueWait,
-		*flShowQueue,
-		*flQueueCommandParent || *flQueueCommandAncestor != "" || *flQueueCommandPid != -1,
-	)
-
-	if behaviourModifyingFlags > 1 {
+	if exclusiveFlags > 1 {
 		_, _ = fmt.Fprintf(os.Stderr, "%s: Error: Cannot specify %v, %v, %v, %v, and %v (or %v, or %v) at the same time", os.Args[0],
 			"--from-stdin",
 			"--_execute-and-flush-tty",
@@ -143,7 +143,7 @@ func parseArgs() Args {
 		usage()
 	}
 
-	subcommandSupportsTripleColon := behaviourModifyingFlags < 1
+	subcommandSupportsTripleColon := exclusiveFlags < 1
 
 	if subcommandSupportsTripleColon {
 		threeColons := slices.Index(args, ":::")
@@ -198,7 +198,7 @@ func maxMemoryFromFlag() int64 {
 		usage()
 	}
 
-	// decrease by a little bit to cover for Go's overhead. determined by observation
+	// decrease by a little bit to cover for Go's overhead. determined by experimentation and observation
 	percentage *= 0.98
 
 	return int64(float64(totalMemory) * percentage / 100.0)

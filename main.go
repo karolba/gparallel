@@ -316,7 +316,7 @@ func main() {
 
 	args := parseArgs()
 
-	switch true {
+	switch {
 	case *flExecuteAndFlushTty:
 		os.Exit(executeAndFlushTty(args.command))
 	case *flQueueCommandAncestor != "":
@@ -327,6 +327,9 @@ func main() {
 		os.Exit(0)
 	case *flQueueCommandParent:
 		queueCommandForParent(args.command)
+		os.Exit(0)
+	case *flShowQueue:
+		showGlobalQueue()
 		os.Exit(0)
 	}
 

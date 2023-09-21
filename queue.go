@@ -168,6 +168,7 @@ func startProcessesFromQueue(result chan<- ProcessResult) {
 			return
 		}
 	}
+	defer haveToClose("queue file", queueFile)
 
 	reader := bufio.NewReader(queueFile)
 	for {
@@ -203,5 +204,29 @@ func startProcessesFromQueue(result chan<- ProcessResult) {
 	// if it's not successful
 	if err := os.Remove(queueFile.Name()); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%s: Warning: could not remove the queue file(%s): %v\n", os.Args[0], queueFile.Name(), err)
+	}
+}
+
+func showGlobalQueue() {
+	queues := filepath.Dir(filepath.Dir(queueDataPath(0)))
+	glob := filepath.Join(queues, "*", "queue")
+	matches, err := filepath.Glob(glob)
+	if err != nil {
+		log.Fatalf("Couldn't glob for %v: %v\n", glob, err)
+	}
+
+	for i, match := range matches {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Println("===", match, "===")
+
+		file, err := os.Open(match)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "%s: Could not open %v\n", os.Args[0], err)
+			continue
+		}
+		_, _ = io.Copy(os.Stdout, file)
+		haveToClose(match, file)
 	}
 }
