@@ -240,7 +240,9 @@ func runInteractive(cmd *exec.Cmd) *Output {
 		}
 	}()
 
-	cmd.Stdin = stdoutTty
+	if cmd.Stdin == nil {
+		cmd.Stdin = stdoutTty
+	}
 	cmd.Stdout = stdoutTty
 	cmd.Stderr = stderrTty
 
@@ -301,13 +303,14 @@ func executable() string {
 	}
 }
 
-func run(command []string) (result ProcessResult) {
+func runWithStdin(command []string, stdin io.Reader) (result ProcessResult) {
 	result.originalCommand = command
 	if stdoutIsTty {
 		command = append([]string{executable(), "--_execute-and-flush-tty"}, command...)
 	}
 
 	result.cmd = exec.Command(command[0], command[1:]...)
+	result.cmd.Stdin = stdin
 
 	if stdoutIsTty {
 		result.output = runInteractive(result.cmd)
@@ -323,4 +326,8 @@ func run(command []string) (result ProcessResult) {
 
 	result.startedAt = time.Now()
 	return result
+}
+
+func run(command []string) (result ProcessResult) {
+	return runWithStdin(command, nil)
 }

@@ -26,7 +26,9 @@ type QueuedCommand struct {
 		Pid       int
 		StartedAt int64
 	}
-	Command []string
+	WithStdin    bool
+	SlurpedStdin []byte
+	Command      []string
 }
 
 func queueDataPath(pid int) string {
@@ -97,6 +99,14 @@ func queueCommand(command []string, forPid int) {
 	qc.QueuedFor.Pid = forPid
 	qc.QueuedFor.StartedAt = createTime
 
+	if *flSlurpStdin {
+		qc.WithStdin = true
+		qc.SlurpedStdin, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			log.Fatalf("Did not queue command %v - could not read stdin for --slurp-stdin: %v\n", shellescape.QuoteCommand(command), err)
+		}
+	}
+
 	// Write the command to the queue file
 	queue := appendableQueueDataFile(forPid)
 	defer haveToClose("queue file", queue)
@@ -141,6 +151,15 @@ func queueCommandForParent(command []string) {
 	queueCommand(command, os.Getppid())
 }
 
+func pipeWriter(data []byte) *io.PipeReader {
+	pipeReader, pipeWriter := io.Pipe()
+	go func() {
+		_, _ = pipeWriter.Write(data)
+		_ = pipeWriter.Close()
+	}()
+	return pipeReader
+}
+
 func startProcessesFromQueue(result chan<- ProcessResult) {
 	// start from our pid, not ppid, in case `gparallel --wait` is placed at the end of a shellscript, which would
 	// automatically turn it into `exec gparallel --wait` as an optimisation
@@ -164,7 +183,7 @@ func startProcessesFromQueue(result chan<- ProcessResult) {
 		procWithQueue, err = procWithQueue.Parent()
 		if err != nil {
 			// Don't make this an explicit error, rather, just a warning
-			_, _ = fmt.Fprintf(os.Stderr, "%s: Could not find any parent process with an active queue\n", os.Args[0])
+			_, _ = fmt.Fprintf(os.Stderr, "%s: Warning: could not find any parent process with an active queue\n", os.Args[0])
 			return
 		}
 	}
@@ -176,6 +195,7 @@ func startProcessesFromQueue(result chan<- ProcessResult) {
 
 		if len(line) > 0 {
 			qc := QueuedCommand{}
+
 			if err := json.Unmarshal(line, &qc); err != nil {
 				log.Fatalf("Could not parse queue line '%s' from file '%s': %v\n", string(line), queueFile.Name(), err)
 			}
@@ -189,7 +209,16 @@ func startProcessesFromQueue(result chan<- ProcessResult) {
 			if noLongerSpawnChildren.Load() {
 				break
 			}
-			result <- run(qc.Command)
+
+			if qc.WithStdin {
+				if qc.SlurpedStdin == nil {
+					log.Fatalf("Queued WithStdin is true, but SlurpedStdin is nil: %+v\n", qc)
+				}
+
+				result <- runWithStdin(qc.Command, pipeWriter(qc.SlurpedStdin))
+			} else {
+				result <- run(qc.Command)
+			}
 		}
 
 		if err == io.EOF {
