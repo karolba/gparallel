@@ -160,7 +160,7 @@ func parseArgs() Args {
 		errorWithUsage("The --slurp-stdin flag can only be specified with %s, %s, or %s",
 			"--queue-command",
 			"--queue-command-pid",
-			"--queue-commmand-ancestor")
+			"--queue-command-ancestor")
 	}
 
 	subcommandSupportsTripleColon := exclusiveFlags < 1
