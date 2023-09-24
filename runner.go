@@ -39,6 +39,7 @@ type ProcessResult struct {
 	output          *Output
 	originalCommand []string
 	cmd             *exec.Cmd
+	exitCode        chan int
 }
 
 func (proc *ProcessResult) isAlive() bool {
@@ -57,8 +58,6 @@ func (proc *ProcessResult) isAlive() bool {
 
 func (proc *ProcessResult) wait() error {
 	if *flRecursiveProcessLimit {
-		// TODO: .del() should consider cases when a child dies before we now currently wait for it,
-		//       because as of now, zombies will be counted as genuine children
 		defer recursiveTaskLimitClient().del(proc)
 	}
 
@@ -312,6 +311,7 @@ func executable() string {
 func runWithStdin(command []string, stdin io.Reader) (result *ProcessResult) {
 	result = &ProcessResult{}
 	result.originalCommand = command
+	result.exitCode = make(chan int)
 
 	if *flRecursiveProcessLimit {
 		recursiveTaskLimitClient().addWait(result)
@@ -337,6 +337,21 @@ func runWithStdin(command []string, stdin io.Reader) (result *ProcessResult) {
 	}
 
 	result.startedAt = time.Now()
+
+	go func() {
+		err := result.wait()
+
+		// Check if our child exited unsuccessfully
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			result.exitCode <- exitErr.ExitCode()
+		}
+		if err != nil {
+			log.Fatalf("Failed to wait for command %s: %v\n", shellescape.QuoteCommand(command), err)
+		}
+		result.exitCode <- 0
+	}()
+
 	return result
 }
 

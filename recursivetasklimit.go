@@ -68,10 +68,9 @@ var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
 	// called when a process dies, to make room for a new one
 	del func(result *ProcessResult)
 }) {
-	type processDied struct{ error }
 	type ProcessQueueData struct {
 		processResult *ProcessResult
-		cancel        context.CancelCauseFunc
+		cancel        context.CancelFunc
 		conn          net.Conn
 	}
 	queue := make([]*ProcessQueueData, 0, *flMaxProcesses)
@@ -104,9 +103,9 @@ var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
 			return
 		}
 
-		var ctx context.Context
 		dialer := net.Dialer{}
-		ctx, processQueueData.cancel = context.WithCancelCause(context.Background())
+		ctx, cancel := context.WithCancel(context.Background())
+		processQueueData.cancel = cancel
 
 		mutex.Unlock()
 		conn, err := dialer.DialContext(ctx, "unix", serverSocketPath)
@@ -114,7 +113,7 @@ var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
 
 		processQueueData.conn = conn
 
-		if errors.Is(err, processDied{}) || errors.Is(err, net.ErrClosed) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
 			return
 		} else if err != nil {
 			log.Fatalf("Couldn't connect to Unix socket '%s': %v\n", serverSocketPath, err)
@@ -134,7 +133,7 @@ var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
 		}
 		mutex.Lock()
 
-		if errors.Is(err, processDied{}) || errors.Is(err, net.ErrClosed) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
 			return
 		} else if err != nil {
 			log.Fatalf("Couldn't connect read from unix socket '%s': %v\n", serverSocketPath, err)
@@ -157,8 +156,8 @@ var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
 			_, _ = toClose.conn.Write([]byte{2})
 			haveToClose("connection to master gparallel", toClose.conn)
 			toClose.conn = nil
-		} else if toClose != nil {
-			toClose.cancel(processDied{})
+		} else if toClose != nil && toClose.cancel != nil {
+			toClose.cancel()
 		}
 
 		idx, _ := findInQueue(zombieProcess)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -73,18 +72,7 @@ func toForeground(proc *ProcessResult) (exitCode int) {
 	proc.output.shouldPassToParent = true
 	proc.output.partsMutex.Unlock()
 
-	err := proc.wait()
-
-	// Check if our child exited unsuccessfully
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
-	}
-
-	if err != nil {
-		log.Fatal(err)
-	}
-	return 0
+	return <-proc.exitCode // block until the process exits
 }
 
 func tryToIncreaseNoFile() {
@@ -107,7 +95,7 @@ func waitForChildrenAfterAFailedOne(processes <-chan *ProcessResult) {
 
 		wg.Add(1)
 		go func() {
-			_ = processResult.wait()
+			<-processResult.exitCode
 			wg.Done()
 		}()
 	}
@@ -302,13 +290,14 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *flRecursiveProcessLimit {
+	if !*flRecursiveProcessLimit {
 		if _, hasMasterLimitServer := os.LookupEnv(EnvGparallelChildLimitSocket); !hasMasterLimitServer {
 			createLimitServer()
 		}
 	}
 
-	processes := make(chan *ProcessResult, *flMaxProcesses)
+	// TODO: there's now basically no limit with flRecursiveProcessLimit being false
+	processes := make(chan *ProcessResult, 32*1024)
 	go func() {
 		defer close(processes)
 
