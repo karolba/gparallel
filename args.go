@@ -19,37 +19,24 @@ type Args struct {
 	hasTripleColon bool
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	} else {
-		return b
-	}
-}
-func min(a, b int) int {
-	if a < b {
-		return a
-	} else {
-		return b
-	}
-}
-
 var (
 	flExecuteAndFlushTty     = flag.Bool("_execute-and-flush-tty", false, "Execute a given command and flush attached ttys afterwards. Used internally by gparallel.")
-	flFromStdin              = flag.BoolP("from-stdin", "s", false, "Get input from stdin")
-	flKeepGoingOnError       = flag.Bool("keep-going-on-error", false, "Don't exit on error, keep going")
+	flFromStdin              = flag.BoolP("from-stdin", "s", false, "Get input from stdin.")
+	flHelp                   = flag.BoolP("help", "h", false, "Show this help message.")
+	flKeepGoingOnError       = flag.Bool("keep-going-on-error", false, "Don't exit on error, keep going.")
 	flMaxMemory              = flag.String("max-mem", "5%", "How much system `memory` can be used for storing command outputs before we start blocking.\nSet to 'inf' to disable the limit.")
 	flMaxProcesses           = flag.IntP("max-concurrent", "P", max(runtime.NumCPU(), 2), "How many concurrent `children` to execute at once at maximum.\n(minimum 2, default based on the amount of cores)")
 	flMaxProcessesUpperLimit = flag.Int("max-concurrent-upper-limit", max(runtime.NumCPU(), 2), "The upper limit of maximum processes when inferring them from the number of CPUs.")
-	flQueueCommandAncestor   = flag.String("queue-command-ancestor", "", "Queue a command for a specific ancestor process with a `name` to later execute with --wait")
-	flQueueCommandParent     = flag.Bool("queue-command", false, "Queue a command for parent of gparellel to later execute with --wait")
-	flQueueCommandPid        = flag.Int("queue-command-pid", -1, "Queue a command for a specific ancestor `pid` to let it later execute it with --wait")
-	flQueueWait              = flag.Bool("wait", false, "Execute and wait for commands queued using --queue-*")
-	flShowQueue              = flag.Bool("show-queue", false, "Show every queued command for every process - useful for debugging missing --wait calls")
-	flSlurpStdin             = flag.Bool("slurp-stdin", false, "Read all available stdin and pass it onto the command - only works in the --queue-command-* mode.\n(as otherwise it would send everything to the first command)")
-	flTemplate               = flag.StringP("replacement", "I", "{}", "The `replacement` string")
-	flVerbose                = flag.BoolP("verbose", "v", false, "Print the full command line before each execution")
-	flVersion                = flag.Bool("version", false, "Show program version")
+	flQueueCommandAncestor   = flag.String("queue-command-ancestor", "", "Queue a command for a specific ancestor process with a `name` to later execute with --wait.")
+	flQueueCommandParent     = flag.Bool("queue-command", false, "Queue a command for parent of gparellel to later execute with --wait.")
+	flQueueCommandPid        = flag.Int("queue-command-pid", -1, "Queue a command for a specific ancestor `pid` to let it later execute it with --wait.")
+	flQueueWait              = flag.Bool("wait", false, "Execute and wait for commands queued using --queue-*.")
+	flRecursiveProcessLimit  = flag.Bool("recursive-max-concurrent", true, "Whether to apply the one -P children limit to all gparallel subprocesses as well as a shared\nresource.")
+	flShowQueue              = flag.Bool("show-queue", false, "Show every queued command for every process - useful for debugging missing --wait calls.")
+	flSlurpStdin             = flag.Bool("slurp-stdin", false, "Read all available stdin and pass it onto the command - only works in the --queue-command-* mode.\n(as otherwise it would send everything to the first command).")
+	flTemplate               = flag.StringP("replacement", "I", "{}", "The `replacement` string.")
+	flVerbose                = flag.BoolP("verbose", "v", false, "Print the full command line before each execution.")
+	flVersion                = flag.Bool("version", false, "Show the program version.")
 
 	parsedFlMaxMemory int64
 )
@@ -107,14 +94,14 @@ func usage() {
 	flag.PrintDefaults()
 }
 
-func exitWithUsage() {
+func exitWithUsage(exitCode int) {
 	usage()
-	os.Exit(1)
+	os.Exit(exitCode)
 }
 
 func errorWithUsage(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, "%s: Argument error: "+format+"\n\n", append([]any{os.Args[0]}, args...))
-	exitWithUsage()
+	exitWithUsage(1)
 }
 
 func parseArgs() Args {
@@ -126,6 +113,10 @@ func parseArgs() Args {
 	if *flVersion {
 		showVersion()
 		os.Exit(0)
+	}
+
+	if *flHelp {
+		exitWithUsage(0)
 	}
 
 	parsedFlMaxMemory = maxMemoryFromFlag()
@@ -147,7 +138,7 @@ func parseArgs() Args {
 	)
 
 	if len(args) == 0 && flagsPreventingFurtherArguments == 0 {
-		exitWithUsage()
+		exitWithUsage(1)
 	}
 
 	if *flMaxProcesses <= 1 {

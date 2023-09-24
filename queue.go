@@ -32,19 +32,7 @@ type QueuedCommand struct {
 }
 
 func queueDataPath(pid int) string {
-	var dir string
-
-	if _, err := os.Stat("/dev/shm"); !os.IsNotExist(err) {
-		dir = "/dev/shm"
-	} else if _, err := os.Stat(os.TempDir()); !os.IsNotExist(err) {
-		dir = os.TempDir()
-	} else if _, err := os.Stat("/tmp"); !os.IsNotExist(err) {
-		dir = "/tmp"
-	} else {
-		dir = "."
-	}
-
-	return filepath.Join(dir, ".gparallel", strconv.Itoa(pid), "queue")
+	return filepath.Join(dataDir(), strconv.Itoa(pid), "queue")
 }
 
 func appendableQueueDataFile(pid int) *os.File {
@@ -160,7 +148,7 @@ func pipeWriter(data []byte) *io.PipeReader {
 	return pipeReader
 }
 
-func startProcessesFromQueue(result chan<- ProcessResult) {
+func startProcessesFromQueue(result chan<- *ProcessResult) {
 	// start from our pid, not ppid, in case `gparallel --wait` is placed at the end of a shellscript, which would
 	// automatically turn it into `exec gparallel --wait` as an optimisation
 	procWithQueue, err := process.NewProcess(int32(os.Getpid()))

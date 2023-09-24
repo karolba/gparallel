@@ -41,7 +41,7 @@ type ProcessResult struct {
 	cmd             *exec.Cmd
 }
 
-func (proc ProcessResult) isAlive() bool {
+func (proc *ProcessResult) isAlive() bool {
 	p, err := process.NewProcess(int32(proc.cmd.Process.Pid))
 	if err != nil {
 		return false
@@ -55,10 +55,16 @@ func (proc ProcessResult) isAlive() bool {
 	return !slices.Contains(statuses, process.Zombie)
 }
 
-func (proc ProcessResult) wait() error {
+func (proc *ProcessResult) wait() error {
+	if *flRecursiveProcessLimit {
+		// TODO: .del() should consider cases when a child dies before we now currently wait for it,
+		//       because as of now, zombies will be counted as genuine children
+		defer recursiveTaskLimitClient().del(proc)
+	}
+
 	// wait for both stdout and stderr if we opened two readers
 	<-proc.output.streamClosed
-	if !stdoutAndStderrAreTheSame {
+	if !stdoutAndStderrAreTheSame() {
 		<-proc.output.streamClosed
 	}
 
@@ -205,7 +211,7 @@ func runInteractive(cmd *exec.Cmd) *Output {
 	}
 	defer haveToClose("stdout tty", stdoutTty)
 
-	if stdoutAndStderrAreTheSame {
+	if stdoutAndStderrAreTheSame() {
 		out.stderrPipeOrPty, stderrTty = out.stdoutPipeOrPty, stdoutTty
 	} else {
 		out.stderrPipeOrPty, stderrTty, err = createPty(size)
@@ -234,7 +240,7 @@ func runInteractive(cmd *exec.Cmd) *Output {
 
 			_ = ptyPkg.Setsize(out.stdoutPipeOrPty, size)
 
-			if !stdoutAndStderrAreTheSame {
+			if !stdoutAndStderrAreTheSame() {
 				_ = ptyPkg.Setsize(out.stderrPipeOrPty, size)
 			}
 		}
@@ -266,7 +272,7 @@ func runNonInteractive(cmd *exec.Cmd) *Output {
 	}
 	defer haveToClose("stdout pipe", stdoutWritePipe)
 
-	if stdoutAndStderrAreTheSame {
+	if stdoutAndStderrAreTheSame() {
 		out.stderrPipeOrPty, stderrWritePipe = out.stdoutPipeOrPty, stdoutWritePipe
 	} else {
 		out.stderrPipeOrPty, stderrWritePipe, err = os.Pipe()
@@ -303,8 +309,14 @@ func executable() string {
 	}
 }
 
-func runWithStdin(command []string, stdin io.Reader) (result ProcessResult) {
+func runWithStdin(command []string, stdin io.Reader) (result *ProcessResult) {
+	result = &ProcessResult{}
 	result.originalCommand = command
+
+	if *flRecursiveProcessLimit {
+		recursiveTaskLimitClient().addWait(result)
+	}
+
 	if stdoutIsTty {
 		command = append([]string{executable(), "--_execute-and-flush-tty"}, command...)
 	}
@@ -320,7 +332,7 @@ func runWithStdin(command []string, stdin io.Reader) (result ProcessResult) {
 
 	result.output.streamClosed = make(chan struct{}, 2)
 	go readContinuouslyTo(result.output.stdoutPipeOrPty, result.output, syscall.Stdout)
-	if !stdoutAndStderrAreTheSame {
+	if !stdoutAndStderrAreTheSame() {
 		go readContinuouslyTo(result.output.stderrPipeOrPty, result.output, syscall.Stderr)
 	}
 
@@ -328,6 +340,6 @@ func runWithStdin(command []string, stdin io.Reader) (result ProcessResult) {
 	return result
 }
 
-func run(command []string) (result ProcessResult) {
+func run(command []string) (result *ProcessResult) {
 	return runWithStdin(command, nil)
 }

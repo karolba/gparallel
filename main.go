@@ -37,37 +37,6 @@ var yellow = color.New(color.FgYellow).SprintFunc()
 
 var stdoutIsTty = isatty.IsTerminal(uintptr(syscall.Stdout))
 
-// stdoutAndStderrAreTheSame tells us if stdout and stderr point to the same file/pipe/stream, for the sole purpose
-// of conserving pty/tty pairs - which are a very limited resource on most unix systems (linux default max: usually
-// from 512 to 4096, macOS default max: from 127 to 512)
-var stdoutAndStderrAreTheSame = func() bool {
-	stdoutStat, err := os.Stdout.Stat()
-	if err != nil {
-		log.Fatalln("Cannot stat stdout:", err)
-	}
-	stdout, ok := stdoutStat.Sys().(*syscall.Stat_t)
-	if !ok {
-		// We probably aren't on a Unix - assume stdout and stderr are the same
-		return false
-	}
-
-	stderrStat, err := os.Stderr.Stat()
-	if err != nil {
-		log.Fatalln("Cannot stat stderr:", err)
-	}
-	stderr, ok := stderrStat.Sys().(*syscall.Stat_t)
-	if !ok {
-		// We probably aren't on a Unix - assume stdout and stderr are the same
-		return false
-	}
-
-	return stdout.Dev == stderr.Dev &&
-		stdout.Ino == stderr.Ino &&
-		stdout.Mode == stderr.Mode &&
-		stdout.Nlink == stderr.Nlink &&
-		stdout.Rdev == stderr.Rdev
-}()
-
 func writeOut(out *Output) {
 	var clearedOutBytes int64
 
@@ -98,7 +67,7 @@ func writeOut(out *Output) {
 	mem.childDiedFreeingMemory.Broadcast()
 }
 
-func toForeground(proc ProcessResult) (exitCode int) {
+func toForeground(proc *ProcessResult) (exitCode int) {
 	proc.output.partsMutex.Lock()
 	writeOut(proc.output)
 	proc.output.shouldPassToParent = true
@@ -128,7 +97,7 @@ func tryToIncreaseNoFile() {
 	_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 }
 
-func waitForChildrenAfterAFailedOne(processes <-chan ProcessResult) {
+func waitForChildrenAfterAFailedOne(processes <-chan *ProcessResult) {
 	wg := sync.WaitGroup{}
 
 	for processResult := range processes {
@@ -179,7 +148,7 @@ func resetTermStateBeforeExit(originalTermState *term.State) {
 	}
 }
 
-func startProcessesFromCliArguments(args Args, result chan<- ProcessResult) {
+func startProcessesFromCliArguments(args Args, result chan<- *ProcessResult) {
 	for _, argument := range args.data {
 		if noLongerSpawnChildren.Load() {
 			break
@@ -189,7 +158,7 @@ func startProcessesFromCliArguments(args Args, result chan<- ProcessResult) {
 	}
 }
 
-func startProcessesFromStdin(args Args, result chan<- ProcessResult) {
+func startProcessesFromStdin(args Args, result chan<- *ProcessResult) {
 	stdinReader := bufio.NewReader(os.Stdin)
 
 	for {
@@ -211,7 +180,7 @@ func startProcessesFromStdin(args Args, result chan<- ProcessResult) {
 	}
 }
 
-func displaySequentially(processes <-chan ProcessResult) (exitCode int) {
+func displaySequentially(processes <-chan *ProcessResult) (exitCode int) {
 	tryToIncreaseNoFile()
 
 	var originalTermState *term.State
@@ -333,8 +302,13 @@ func main() {
 		os.Exit(0)
 	}
 
-	// TODO: make flMaxProcesses be able to be 1
-	processes := make(chan ProcessResult, *flMaxProcesses-2)
+	if *flRecursiveProcessLimit {
+		if _, hasMasterLimitServer := os.LookupEnv(EnvGparallelChildLimitSocket); !hasMasterLimitServer {
+			createLimitServer()
+		}
+	}
+
+	processes := make(chan *ProcessResult, *flMaxProcesses)
 	go func() {
 		defer close(processes)
 
