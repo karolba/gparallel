@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/mattn/go-isatty"
 )
 
 func max(a, b int) int {
@@ -23,6 +25,10 @@ func min(a, b int) int {
 		return b
 	}
 }
+
+var stdoutIsTty = sync.OnceValue(func() bool {
+	return isatty.IsTerminal(uintptr(syscall.Stdout))
+})
 
 var dataDir = sync.OnceValue(func() (dir string) {
 	if _, err := os.Stat("/dev/shm"); !os.IsNotExist(err) {

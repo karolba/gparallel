@@ -17,7 +17,6 @@ import (
 
 	"github.com/alessio/shellescape"
 	"github.com/fatih/color"
-	"github.com/mattn/go-isatty"
 	"github.com/pkg/term/termios"
 	"golang.design/x/chann"
 	"golang.org/x/exp/slices"
@@ -34,8 +33,6 @@ var noLongerSpawnChildren = atomic.Bool{}
 
 var bold = color.New(color.Bold).SprintFunc()
 var yellow = color.New(color.FgYellow).SprintFunc()
-
-var stdoutIsTty = isatty.IsTerminal(uintptr(syscall.Stdout))
 
 func writeOut(out *Output) {
 	var clearedOutBytes int64
@@ -175,7 +172,7 @@ func displaySequentially(processes <-chan *ProcessResult) (exitCode int) {
 	var originalTermState *term.State
 	var err error
 
-	if stdoutIsTty {
+	if stdoutIsTty() {
 		originalTermState, err = term.GetState(syscall.Stdout)
 		if err != nil {
 			log.Printf("Warning: could get terminal state for stdout: %v\n", err)
@@ -199,7 +196,7 @@ func displaySequentially(processes <-chan *ProcessResult) (exitCode int) {
 		if *flVerbose {
 			quotedCommand := shellescape.QuoteCommand(processResult.originalCommand)
 
-			if firstProcess || !stdoutIsTty {
+			if firstProcess || !stdoutIsTty() {
 				_, _ = fmt.Fprintf(os.Stderr, bold("+ %s")+"\n", quotedCommand)
 			} else if !processResult.isAlive() {
 				_, _ = fmt.Fprintf(os.Stderr,

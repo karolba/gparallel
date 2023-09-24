@@ -313,14 +313,14 @@ func runWithStdin(command []string, stdin io.Reader) (result *ProcessResult) {
 
 	recursiveTaskLimitClient().addWait(result)
 
-	if stdoutIsTty {
+	if stdoutIsTty() {
 		command = append([]string{executable(), "--_execute-and-flush-tty"}, command...)
 	}
 
 	result.cmd = exec.Command(command[0], command[1:]...)
 	result.cmd.Stdin = stdin
 
-	if stdoutIsTty {
+	if stdoutIsTty() {
 		result.output = runInteractive(result.cmd)
 	} else {
 		result.output = runNonInteractive(result.cmd)
