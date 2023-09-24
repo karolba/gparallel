@@ -9,9 +9,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"sync"
+
+	"golang.org/x/exp/slices"
 )
 
 const EnvGparallelChildLimitSocket = "_GPARALLEL_CHILD_LIMIT_SOCKET"
@@ -75,7 +76,7 @@ func createLimitServer() {
 	}
 }
 
-var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
+var recursiveTaskLimitClient = onceValue(func() (client struct {
 	// waits before we're allowed to start a new process
 	addWait func(result *ProcessResult)
 

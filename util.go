@@ -26,11 +26,11 @@ func min(a, b int) int {
 	}
 }
 
-var stdoutIsTty = sync.OnceValue(func() bool {
+var stdoutIsTty = onceValue(func() bool {
 	return isatty.IsTerminal(uintptr(syscall.Stdout))
 })
 
-var dataDir = sync.OnceValue(func() (dir string) {
+var dataDir = onceValue(func() (dir string) {
 	if _, err := os.Stat("/dev/shm"); !os.IsNotExist(err) {
 		dir = "/dev/shm"
 	} else if _, err := os.Stat(os.TempDir()); !os.IsNotExist(err) {
@@ -55,7 +55,7 @@ var dataDir = sync.OnceValue(func() (dir string) {
 // stdoutAndStderrAreTheSame tells us if stdout and stderr point to the same file/pipe/stream, for the sole purpose
 // of conserving pty/tty pairs - which are a very limited resource on most unix systems (linux default max: usually
 // from 512 to 4096, macOS default max: from 127 to 512)
-var stdoutAndStderrAreTheSame = sync.OnceValue(func() bool {
+var stdoutAndStderrAreTheSame = onceValue(func() bool {
 	stdoutStat, err := os.Stdout.Stat()
 	if err != nil {
 		log.Fatalln("Cannot stat stdout:", err)
@@ -93,5 +93,32 @@ func mustSetenv(key, value string) {
 func assert(msg string, condition bool) {
 	if !condition {
 		log.Panicln("Failed assert:", msg)
+	}
+}
+
+// an exact copy of sync.OnceValue to support pre-1.21 versions of Go
+func onceValue[T any](f func() T) func() T {
+	var (
+		once   sync.Once
+		valid  bool
+		p      any
+		result T
+	)
+	g := func() {
+		defer func() {
+			p = recover()
+			if !valid {
+				panic(p)
+			}
+		}()
+		result = f()
+		valid = true
+	}
+	return func() T {
+		once.Do(g)
+		if !valid {
+			panic(p)
+		}
+		return result
 	}
 }
