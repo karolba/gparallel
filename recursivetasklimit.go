@@ -136,7 +136,7 @@ var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
 		if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
 			return
 		} else if err != nil {
-			log.Fatalf("Couldn't connect read from unix socket '%s': %v\n", serverSocketPath, err)
+			log.Fatalf("Couldn't read from unix socket '%s': %v\n", serverSocketPath, err)
 		}
 	}
 	client.del = func(zombieProcess *ProcessResult) {
