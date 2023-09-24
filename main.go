@@ -19,6 +19,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/mattn/go-isatty"
 	"github.com/pkg/term/termios"
+	"golang.design/x/chann"
 	"golang.org/x/exp/slices"
 	"golang.org/x/term"
 )
@@ -296,23 +297,22 @@ func main() {
 		}
 	}
 
-	// TODO: there's now basically no limit with flRecursiveProcessLimit being false
-	processes := make(chan *ProcessResult, 32*1024)
+	processes := chann.New[*ProcessResult]()
 	go func() {
-		defer close(processes)
+		defer processes.Close()
 
 		if *flQueueWait {
-			startProcessesFromQueue(processes)
+			startProcessesFromQueue(processes.In())
 			return
 		}
 
 		if args.hasTripleColon {
-			startProcessesFromCliArguments(args, processes)
+			startProcessesFromCliArguments(args, processes.In())
 		}
 		if *flFromStdin {
-			startProcessesFromStdin(args, processes)
+			startProcessesFromStdin(args, processes.In())
 		}
 	}()
 
-	os.Exit(displaySequentially(processes))
+	os.Exit(displaySequentially(processes.Out()))
 }

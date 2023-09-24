@@ -11,6 +11,7 @@ require (
 	github.com/pkg/term v1.2.0-beta.2
 	github.com/shirou/gopsutil/v3 v3.23.8
 	github.com/spf13/pflag v1.0.5
+	golang.design/x/chann v0.1.2
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9
 	golang.org/x/sys v0.12.0
 	golang.org/x/term v0.12.0
@@ -27,3 +28,6 @@ require (
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.3 // indirect
 )
+
+// https://github.com/golang-design/chann/pull/5
+replace golang.design/x/chann v0.1.2 => github.com/amyangfei/chann v0.0.0-20230110021018-bca7d685828c
