@@ -28,7 +28,7 @@ func writeOneByte(writer io.Writer) error {
 	return err
 }
 
-func serveClients(listener net.Listener) {
+func serveClients(listener net.Listener, acceptNewTasks bool) {
 	for {
 		conn, err := listener.Accept()
 		if errors.Is(err, net.ErrClosed) {
@@ -38,7 +38,9 @@ func serveClients(listener net.Listener) {
 			log.Fatalf("Error accepting connection on the %s unix socket: %v\n", os.Getenv(EnvGparallelChildLimitSocket), err)
 		}
 
-		_ = writeOneByte(conn)
+		if acceptNewTasks {
+			_ = writeOneByte(conn)
+		}
 
 		err = readOneByte(conn)
 		if errors.Is(err, net.ErrClosed) {
@@ -47,7 +49,6 @@ func serveClients(listener net.Listener) {
 
 		_ = conn.Close()
 	}
-
 }
 
 func createLimitServer() {
@@ -72,7 +73,13 @@ func createLimitServer() {
 	// as there are active serveClients goroutines. That's why we spawn (*flMaxProcesses-1)
 	// of them.
 	for i := 0; i < *flMaxProcesses-1; i++ {
-		go serveClients(listener)
+		go serveClients(listener, true)
+	}
+
+	// If only foreground processes are allowed, still respond to task limit queries, but
+	// never allow anything, to be able to use the same logic in clients
+	if *flMaxProcesses == 1 {
+		go serveClients(listener, false)
 	}
 }
 
