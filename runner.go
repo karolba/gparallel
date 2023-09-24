@@ -345,6 +345,7 @@ func runWithStdin(command []string, stdin io.Reader) (result *ProcessResult) {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			result.exitCode <- exitErr.ExitCode()
+			return
 		}
 		if err != nil {
 			log.Fatalf("Failed to wait for command %s: %v\n", shellescape.QuoteCommand(command), err)

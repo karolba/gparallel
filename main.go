@@ -290,7 +290,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	if !*flRecursiveProcessLimit {
+	if *flRecursiveProcessLimit {
 		if _, hasMasterLimitServer := os.LookupEnv(EnvGparallelChildLimitSocket); !hasMasterLimitServer {
 			createLimitServer()
 		}
