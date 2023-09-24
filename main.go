@@ -245,17 +245,17 @@ func executeAndFlushTty(command []string) (exitCode int) {
 		log.Fatalf("Could not find executable %s: %v\n", command[0], err)
 	}
 
-	// this process won't be used for anything much more, let's cap memory usage a bit
-	// this reduces memory usage by a couple of megabytes when running a lot of executeAndFlushTtys
-	debug.SetMemoryLimit(0)
-	debug.FreeOSMemory()
-
 	process, err := os.StartProcess(path, command, &os.ProcAttr{
 		Files: standardFdToFile,
 	})
 	if err != nil {
 		log.Fatalf("Could not displaySequentially %s: %v\n", shellescape.QuoteCommand(command), err)
 	}
+
+	// this process won't be used for anything much more, let's cap memory usage a bit
+	// this reduces memory usage by a couple of megabytes when running a lot of executeAndFlushTtys
+	debug.SetMemoryLimit(0)
+	debug.FreeOSMemory()
 
 	processState, err := process.Wait()
 	if err != nil {
@@ -291,10 +291,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *flRecursiveProcessLimit {
-		if _, hasMasterLimitServer := os.LookupEnv(EnvGparallelChildLimitSocket); !hasMasterLimitServer {
-			createLimitServer()
-		}
+	if !*flRecursiveProcessLimit {
+		_ = os.Unsetenv(EnvGparallelChildLimitSocket)
+	}
+	if _, hasMasterLimitServer := os.LookupEnv(EnvGparallelChildLimitSocket); !hasMasterLimitServer {
+		createLimitServer()
 	}
 
 	processes := chann.New[*ProcessResult]()

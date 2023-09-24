@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -15,6 +16,17 @@ import (
 
 const EnvGparallelChildLimitSocket = "_GPARALLEL_CHILD_LIMIT_SOCKET"
 
+func readOneByte(reader io.Reader) error {
+	var b [1]byte
+	_, err := reader.Read(b[:])
+	return err
+}
+
+func writeOneByte(writer io.Writer) error {
+	_, err := writer.Write([]byte{1})
+	return err
+}
+
 func serveClients(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
@@ -25,10 +37,9 @@ func serveClients(listener net.Listener) {
 			log.Fatalf("Error accepting connection on the %s unix socket: %v\n", os.Getenv(EnvGparallelChildLimitSocket), err)
 		}
 
-		_, _ = conn.Write([]byte{1})
+		_ = writeOneByte(conn)
 
-		var buf [1]byte
-		_, err = conn.Read(buf[:])
+		err = readOneByte(conn)
 		if errors.Is(err, net.ErrClosed) {
 			break
 		}
@@ -56,6 +67,9 @@ func createLimitServer() {
 		log.Fatalf("Couldn't listen on unix socket '%s': %v\n", listenPath, err)
 	}
 
+	// Every process has the ability to spawn 1 child of its own, and as many other children
+	// as there are active serveClients goroutines. That's why we spawn (*flMaxProcesses-1)
+	// of them.
 	for i := 0; i < *flMaxProcesses-1; i++ {
 		go serveClients(listener)
 	}
@@ -121,11 +135,7 @@ var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
 
 		mutex.Unlock()
 		ch := make(chan error)
-		go func() {
-			var b [1]byte
-			_, err = conn.Read(b[:])
-			ch <- err
-		}()
+		go func() { ch <- readOneByte(conn) }()
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
@@ -153,7 +163,7 @@ var recursiveTaskLimitClient = sync.OnceValue(func() (client struct {
 		}
 
 		if toClose != nil && toClose.conn != nil {
-			_, _ = toClose.conn.Write([]byte{2})
+			_ = writeOneByte(toClose.conn)
 			haveToClose("connection to master gparallel", toClose.conn)
 			toClose.conn = nil
 		} else if toClose != nil && toClose.cancel != nil {

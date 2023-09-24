@@ -57,9 +57,7 @@ func (proc *ProcessResult) isAlive() bool {
 }
 
 func (proc *ProcessResult) wait() error {
-	if *flRecursiveProcessLimit {
-		defer recursiveTaskLimitClient().del(proc)
-	}
+	defer recursiveTaskLimitClient().del(proc)
 
 	// wait for both stdout and stderr if we opened two readers
 	<-proc.output.streamClosed
@@ -313,9 +311,7 @@ func runWithStdin(command []string, stdin io.Reader) (result *ProcessResult) {
 	result.originalCommand = command
 	result.exitCode = make(chan int)
 
-	if *flRecursiveProcessLimit {
-		recursiveTaskLimitClient().addWait(result)
-	}
+	recursiveTaskLimitClient().addWait(result)
 
 	if stdoutIsTty {
 		command = append([]string{executable(), "--_execute-and-flush-tty"}, command...)
