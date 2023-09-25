@@ -45,7 +45,7 @@ var dataDir = onceValue(func() (dir string) {
 	}
 
 	currentUser, err := user.Current()
-	if err != nil && currentUser.Username != "" {
+	if err == nil || currentUser.Username == "" {
 		return filepath.Join(dir, ".gparallel")
 	} else {
 		return filepath.Join(dir, ".gparallel-"+currentUser.Username)
