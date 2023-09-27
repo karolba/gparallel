@@ -142,12 +142,10 @@ var recursiveTaskLimitClient = onceValue(func() (client struct {
 		}
 
 		mutex.Unlock()
-		ch := make(chan error)
-		go func() { ch <- readOneByte(conn) }()
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
-		case err = <-ch:
+		case err = <-toChannel(func() error { return readOneByte(conn) }):
 		}
 		mutex.Lock()
 

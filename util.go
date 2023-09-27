@@ -122,3 +122,9 @@ func onceValue[T any](f func() T) func() T {
 		return result
 	}
 }
+
+func toChannel[T any](f func() T) <-chan T {
+	ch := make(chan T)
+	go func() { ch <- f() }()
+	return ch
+}
