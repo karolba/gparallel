@@ -66,8 +66,15 @@ func writeOut(out *Output) {
 
 func toForeground(proc *ProcessResult) (exitCode int) {
 	proc.output.partsMutex.Lock()
+
+	proc.output.shouldPassToParent.value = true
+	proc.output.shouldPassToParent.becameTrue <- struct{}{}
+	if !stdoutAndStderrAreTheSame() {
+		proc.output.shouldPassToParent.becameTrue <- struct{}{}
+	}
+
 	writeOut(proc.output)
-	proc.output.shouldPassToParent = true
+
 	proc.output.partsMutex.Unlock()
 
 	return <-proc.exitCode // block until the process exits

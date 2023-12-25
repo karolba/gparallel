@@ -5,6 +5,7 @@ go 1.19
 require (
 	github.com/alessio/shellescape v1.4.2
 	github.com/creack/pty v1.1.18
+	github.com/danielgatis/go-vte v1.0.6
 	github.com/fatih/color v1.15.0
 	github.com/mattn/go-isatty v0.0.19
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58
