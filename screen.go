@@ -1,9 +1,11 @@
 package main
 
+import (
+	"modernc.org/mathutil"
+)
+
 func ensureAtLeastLength[T any](slice []T, atLeastLength uint16) []T {
 	if len(slice) < int(atLeastLength) {
-		// Expand the slice to be at least 10 long
-		// Append zeros to the slice until it reaches a length of 10
 		slice = append(slice, make([]T, int(atLeastLength)-len(slice))...)
 	}
 	return slice
@@ -36,7 +38,7 @@ func (l *Line) appendToCharacter(i uint16, val string) {
 func (l *Line) setCharacter(i uint16, val string) {
 	l.characters = ensureAtLeastLength(l.characters, i+1)
 
-	l.characters[i] += val
+	l.characters[i] = val
 }
 
 type Screen struct {
@@ -82,28 +84,35 @@ func (s *Screen) outNormalCharacter(b rune) {
 	if s.positionX >= s.width {
 		s.wrapCurrentLine()
 	}
-	s.currentLine().appendToCharacter(s.positionX, string(b))
+	s.currentLine().setCharacter(s.positionX, string(b))
 	s.positionX += 1
 }
 
 func (s *Screen) outRelativeMoveCursorVertical(howMany int) {
-
+	assert("unimplemented", howMany == 1)
+	// TODO!!!
+	s.currentLine().endsWithNewline = true
+	if s.positionY >= s.height {
+		s.scrollDownOneLine()
+	}
+	s.positionY += 1
 }
 
 func (s *Screen) outRelativeMoveCursorHorizontal(howMany int) {
 }
 
-func (s *Screen) outAbsoluteMoveCursorVertical(howMany int) {
+func (s *Screen) outAbsoluteMoveCursorVertical(y int) {
 }
 
-func (s *Screen) outAbsoluteMoveCursorHorizontal(howMany int) {
+func (s *Screen) outAbsoluteMoveCursorHorizontal(x int) {
+	s.positionX = uint16(x)
+	s.positionX = mathutil.ClampUint16(s.positionX, 0, s.width)
 }
 
 func (s *Screen) outDeleteLeft(howMany int) {
-	// TODO: don't just loop this whole part
 	for i := 0; i < howMany; i += 1 {
 		if s.positionX <= 0 {
-			continue
+			break
 		}
 		s.positionX -= 1
 		s.currentLine().setCharacter(s.positionX, "")
