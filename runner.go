@@ -130,6 +130,22 @@ func waitIfUsingTooMuchMemory(willSaveBytes int64, out *Output) {
 	}
 }
 
+func isEOFFromPtmxDevice(err error) bool {
+	if err == io.EOF {
+		return true
+	}
+
+	var pathError *os.PathError
+	if errors.As(err, &pathError) && pathError.Err == syscall.EIO {
+		// Returning EIO is Linux's way of saying the other end is closed when reading from a ptmx:
+		// https://github.com/creack/pty/issues/21
+		// On BSDs (and macOS) this is signaled by a simple EOF
+		return true
+	}
+
+	return false
+}
+
 func readContinuouslyTo(stream io.ReadCloser, throughVirtualScreen *Screen, out *Output, fileDescriptor int) {
 	// Track out.shouldPassToParent ourselves (and update via a channel) to avoid race conditions
 	shouldPassToParent := false
@@ -168,22 +184,12 @@ func readContinuouslyTo(stream io.ReadCloser, throughVirtualScreen *Screen, out 
 			throughVirtualScreen.queuedScrollbackOutput = []byte{}
 		}
 
-		if err != nil {
-			if err == io.EOF {
-				haveToClose("child stdout/stderr after EOF", stream)
-				break
-			}
-			if errors.Is(err, fs.ErrClosed) {
-				break
-			}
-			var pathError *os.PathError
-			if errors.As(err, &pathError) && pathError.Err == syscall.EIO {
-				// Returning EIO is Linux's way of saying the other end is closed when reading from a ptmx:
-				// https://github.com/creack/pty/issues/21
-				// On BSDs (and macOS) this is signaled by a simple EOF
-				haveToClose("child stdout/stderr after EIO", stream)
-				break
-			}
+		if errors.Is(err, fs.ErrClosed) {
+			break
+		} else if isEOFFromPtmxDevice(err) {
+			haveToClose("child stdout/stderr after EIO", stream)
+			break
+		} else if err != nil {
 			log.Fatalf("error from read: %v\n", err)
 		}
 	}
