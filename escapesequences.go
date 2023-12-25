@@ -19,18 +19,22 @@ type EscapeSequenceParser struct {
 	vteParser *vte.Parser
 }
 
-type EscapeSequenceParserOutput struct {
-	outNormalCharacter              func(rune)
-	outRelativeMoveCursorVertical   func(howMany int)
-	outRelativeMoveCursorHorizontal func(howMany int)
-	outAbsoluteMoveCursorVertical   func(howMany int)
-	outAbsoluteMoveCursorHorizontal func(howMany int)
-	outDeleteLeft                   func(howMany int)
-	outUnhandledEscapeSequence      func(string)
+type EscapeSequenceParserOutput interface {
+	outNormalCharacter(b rune)
+	outRelativeMoveCursorVertical(howMany int)
+	outRelativeMoveCursorHorizontal(howMany int)
+	outAbsoluteMoveCursorVertical(howMany int)
+	outAbsoluteMoveCursorHorizontal(howMany int)
+	outDeleteLeft(howMany int)
+	outUnhandledEscapeSequence(s string)
 }
 
-func NewEscapeSequenceParser(outOpts *EscapeSequenceParserOutput) EscapeSequenceParser {
-	return EscapeSequenceParser{vteParser: vte.NewParser(outOpts)}
+type vtePerformer struct{ out EscapeSequenceParserOutput }
+
+func NewEscapeSequenceParser(outOpts EscapeSequenceParserOutput) EscapeSequenceParser {
+	return EscapeSequenceParser{vteParser: vte.NewParser(&vtePerformer{
+		out: outOpts,
+	})}
 }
 
 func (escapeSequenceParser EscapeSequenceParser) Advance(bytes []byte) {
@@ -40,49 +44,49 @@ func (escapeSequenceParser EscapeSequenceParser) Advance(bytes []byte) {
 }
 
 // Draw a character to the screen and update states
-func (p *EscapeSequenceParserOutput) Print(r rune) {
+func (p *vtePerformer) Print(r rune) {
 	//if r == ' ' {
 	//	log.Printf("[Print] space\n")
 	//} else {
 	//	log.Printf("[Print] '%c'\n", r)
 	//}
 
-	p.outNormalCharacter(r)
+	p.out.outNormalCharacter(r)
 }
 
 // Execute a C0 or C1 control function
-func (p *EscapeSequenceParserOutput) Execute(b byte) {
+func (p *vtePerformer) Execute(b byte) {
 	if b == '\t' {
 		// TODO: this... it's not even a tab
-		p.outNormalCharacter(' ')
-		p.outNormalCharacter(' ')
-		p.outNormalCharacter(' ')
-		p.outNormalCharacter(' ')
-		p.outNormalCharacter(' ')
-		p.outNormalCharacter(' ')
-		p.outNormalCharacter(' ')
-		p.outNormalCharacter(' ')
+		p.out.outNormalCharacter(' ')
+		p.out.outNormalCharacter(' ')
+		p.out.outNormalCharacter(' ')
+		p.out.outNormalCharacter(' ')
+		p.out.outNormalCharacter(' ')
+		p.out.outNormalCharacter(' ')
+		p.out.outNormalCharacter(' ')
+		p.out.outNormalCharacter(' ')
 		//log.Printf("[Execute] tab\n")
 	} else if b == '\n' {
-		log.Printf("[Execute] newline\n")
+		p.out.outAbsoluteMoveCursorHorizontal(0)
+		p.out.outRelativeMoveCursorVertical(1)
 	} else if b == '\v' {
-		log.Printf("[Execute] vertical tab\n")
+		log.Printf("[Execute] TODO: vertical tab\n")
 	} else if b == '\r' {
-		//log.Printf("[Execute] carriage return\n")
-		p.outAbsoluteMoveCursorHorizontal(0)
+		p.out.outAbsoluteMoveCursorHorizontal(0)
 	} else if b == '\b' {
-		p.outDeleteLeft(1)
+		p.out.outDeleteLeft(1)
 		//log.Printf("[Execute] delete\n")
 	} else {
-		log.Printf("[Execute] %02x\n", b)
+		log.Printf("TODO: Execute '%c' (%b)\n", b, b)
 	}
 
-	fmt.Printf("%c", b)
+	//fmt.Printf("TODO: Execute '%c'", b)
 }
 
 // Pass bytes as part of a device control string to the handle chosen in hook. C0 controls will also be passed to the handler.
-func (p *EscapeSequenceParserOutput) Put(b byte) {
-	p.outUnhandledEscapeSequence(string(b))
+func (p *vtePerformer) Put(b byte) {
+	p.out.outUnhandledEscapeSequence(string(b))
 	//log.Printf("[Put] %02x %c\n", b, rune(b))
 
 	//fmt.Printf("%c", b)
@@ -90,7 +94,7 @@ func (p *EscapeSequenceParserOutput) Put(b byte) {
 
 // Called when a device control string is terminated.
 // The previously selected handler should be notified that the DCS has terminated.
-func (p *EscapeSequenceParserOutput) Unhook() {
+func (p *vtePerformer) Unhook() {
 	//log.Printf("[Unhook]\n")
 }
 
@@ -129,11 +133,11 @@ func splitIntermediates(intermediates []byte) (privateMarkers []byte, realInteme
 // by put for every character in the control string.
 //
 // The ignore flag indicates that more than two intermediates arrived and subsequent characters were ignored.
-func (p *EscapeSequenceParserOutput) Hook(params [][]uint16, intermediates []byte, ignore bool, final rune) {
+func (p *vtePerformer) Hook(params [][]uint16, intermediates []byte, ignore bool, final rune) {
 	//log.Printf("[Hook] params=%v, intermediates=%v, ignore=%v, r=%c\n", params, intermediates, ignore, final)
 	privateMarkers, realIntemediates := splitIntermediates(intermediates)
 
-	p.outUnhandledEscapeSequence(fmt.Sprintf("%s%s%s%s%c",
+	p.out.outUnhandledEscapeSequence(fmt.Sprintf("%s%s%s%s%c",
 		DCS_START,
 		privateMarkers,
 		paramsToString(params),
@@ -142,9 +146,9 @@ func (p *EscapeSequenceParserOutput) Hook(params [][]uint16, intermediates []byt
 }
 
 // Dispatch an operating system command.
-func (p *EscapeSequenceParserOutput) OscDispatch(params [][]byte, bellTerminated bool) {
+func (p *vtePerformer) OscDispatch(params [][]byte, bellTerminated bool) {
 	//log.Printf("[OscDispatch] params=%v, bellTerminated=%v\n", params, bellTerminated)
-	p.outUnhandledEscapeSequence(fmt.Sprintf("%s%s",
+	p.out.outUnhandledEscapeSequence(fmt.Sprintf("%s%s",
 		OSC_START,
 		bytes.Join(params, []byte{';'})))
 }
@@ -153,20 +157,25 @@ func (p *EscapeSequenceParserOutput) OscDispatch(params [][]byte, bellTerminated
 //
 // The ignore flag indicates that either more than two intermediates arrived or the number of parameters exceeded
 // the maximum supported length, and subsequent characters were ignored.
-func (p *EscapeSequenceParserOutput) CsiDispatch(params [][]uint16, intermediates []byte, ignore bool, final rune) {
+func (p *vtePerformer) CsiDispatch(params [][]uint16, intermediates []byte, ignore bool, final rune) {
 	privateMarkers, realIntemediates := splitIntermediates(intermediates)
-	s := fmt.Sprintf("%s%s%s%s%c", CSI_START, privateMarkers, paramsToString(params), realIntemediates, final)
+	s := fmt.Sprintf("%s%s%s%s%c",
+		CSI_START,
+		privateMarkers,
+		paramsToString(params),
+		realIntemediates,
+		final)
 
 	//log.Printf("[CsiDispatch] params=%v, intermediates=%v, ignore=%v, r=%c, guessed=%s\n", params, intermediates, ignore, final, s[1:])
-	p.outUnhandledEscapeSequence(s)
+	p.out.outUnhandledEscapeSequence(s)
 }
 
 // The final character of an escape sequence has arrived.
 // The ignore flag indicates that more than two intermediates arrived and subsequent characters were ignored.
-func (p *EscapeSequenceParserOutput) EscDispatch(intermediates []byte, ignore bool, final byte) {
+func (p *vtePerformer) EscDispatch(intermediates []byte, ignore bool, final byte) {
 	//log.Printf("[EscDispatch] intermediates=%v, ignore=%v, byte=%02x\n", intermediates, ignore, final)
 
-	p.outUnhandledEscapeSequence(fmt.Sprintf("%s%s%c",
+	p.out.outUnhandledEscapeSequence(fmt.Sprintf("%s%s%c",
 		ESC,
 		intermediates,
 		final))
