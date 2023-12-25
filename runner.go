@@ -188,6 +188,8 @@ func createPty(winSize *ptyPkg.Winsize) (pty, tty *os.File, err error) {
 }
 
 func runInteractive(cmd *exec.Cmd) *Output {
+	// set GOMAXPROCS to 1 to make the process running executeAndFlushTty a bit lighter - it's a really lightweight
+	// job, so it shouldn't consume much resources at all
 	cmd.Env = os.Environ()
 	if originalGoMaxProcs, exists := os.LookupEnv("GOMAXPROCS"); exists {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("_GPARALLEL_ORIGINAL_GOMAXPROCS=%s", originalGoMaxProcs))
