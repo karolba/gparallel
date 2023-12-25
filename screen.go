@@ -99,9 +99,13 @@ func (s *Screen) outRelativeMoveCursorVertical(howMany int) {
 }
 
 func (s *Screen) outRelativeMoveCursorHorizontal(howMany int) {
+	s.positionX = uint16(int(s.positionX) + howMany)
+	s.positionX = mathutil.ClampUint16(s.positionX, 0, s.width)
 }
 
 func (s *Screen) outAbsoluteMoveCursorVertical(y int) {
+	s.positionY = uint16(y)
+	s.positionY = mathutil.ClampUint16(s.positionY, 0, s.height)
 }
 
 func (s *Screen) outAbsoluteMoveCursorHorizontal(x int) {

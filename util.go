@@ -154,3 +154,10 @@ func toChannelWithError[T any](f func() (T, error)) <-chan withError[T] {
 	}()
 	return ch
 }
+
+func getOrDefault[T any](slice []T, index int) (result T) {
+	if index < len(slice) {
+		result = slice[index]
+	}
+	return result
+}

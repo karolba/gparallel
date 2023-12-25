@@ -23,8 +23,8 @@ type EscapeSequenceParserOutput interface {
 	outNormalCharacter(b rune)
 	outRelativeMoveCursorVertical(howMany int)
 	outRelativeMoveCursorHorizontal(howMany int)
-	outAbsoluteMoveCursorVertical(howMany int)
-	outAbsoluteMoveCursorHorizontal(howMany int)
+	outAbsoluteMoveCursorVertical(y int)
+	outAbsoluteMoveCursorHorizontal(x int)
 	outDeleteLeft(howMany int)
 	outUnhandledEscapeSequence(s string)
 }
@@ -153,21 +153,88 @@ func (p *vtePerformer) OscDispatch(params [][]byte, bellTerminated bool) {
 		bytes.Join(params, []byte{';'})))
 }
 
+func numericParams(input [][]uint16) []int {
+	// TODO: make this nicer
+	var result []int
+
+	for _, row := range input {
+		var value int
+		for _, digit := range row {
+			value = value*10 + int(digit)
+		}
+		result = append(result, value)
+	}
+
+	if len(result) == 0 {
+		return []int{0}
+	}
+	return result
+}
+
 // A final character has arrived for a CSI sequence
 //
 // The ignore flag indicates that either more than two intermediates arrived or the number of parameters exceeded
 // the maximum supported length, and subsequent characters were ignored.
 func (p *vtePerformer) CsiDispatch(params [][]uint16, intermediates []byte, ignore bool, final rune) {
 	privateMarkers, realIntemediates := splitIntermediates(intermediates)
-	s := fmt.Sprintf("%s%s%s%s%c",
+
+	// Cursor Up (CUU): ESC [ Ⓝ A - https://terminalguide.namepad.de/seq/csi_ca/
+	if bytes.Equal(intermediates, []byte{}) && final == 'A' {
+		p.out.outRelativeMoveCursorVertical(-numericParams(params)[0])
+		return
+	}
+
+	// Cursor Down (CUD): ESC [ Ⓝ B - https://terminalguide.namepad.de/seq/csi_cb/
+	if bytes.Equal(intermediates, []byte{}) && final == 'B' {
+		p.out.outRelativeMoveCursorVertical(numericParams(params)[0])
+		return
+	}
+
+	// Cursor Right (CUF): ESC [ Ⓝ C - https://terminalguide.namepad.de/seq/csi_cc/
+	if bytes.Equal(intermediates, []byte{}) && final == 'C' {
+		p.out.outRelativeMoveCursorHorizontal(numericParams(params)[0])
+		return
+	}
+
+	// Cursor Left (CUB): ESC [ Ⓝ D - https://terminalguide.namepad.de/seq/csi_cd/
+	if bytes.Equal(intermediates, []byte{}) && final == 'D' {
+		p.out.outRelativeMoveCursorHorizontal(-numericParams(params)[0])
+		return
+	}
+
+	// Set Cursor Position (CUP): ESC [ Ⓝ ; Ⓝ H - https://terminalguide.namepad.de/seq/csi_ch/
+	if bytes.Equal(intermediates, []byte{}) && final == 'H' {
+		coords := numericParams(params)
+		// The coordinates in here are 1-based, but we use 0-based coordinates - hence the minus one
+		x := getOrDefault(coords, 0) - 1
+		y := getOrDefault(coords, 1) - 1
+		p.out.outAbsoluteMoveCursorHorizontal(x)
+		p.out.outAbsoluteMoveCursorHorizontal(y)
+		return
+	}
+
+	// Cursor Horizontal Position Absolute (HPA) (TODO more details)
+	if bytes.Equal(intermediates, []byte{}) && (final == 'G' || final == '`') {
+		// The coordinates in here are 1-based, but we use 0-based coordinates - hence the minus one
+		p.out.outAbsoluteMoveCursorHorizontal(numericParams(params)[0] - 1)
+		return
+	}
+
+	// Cursor Vertical Position Absolute (VPA) (TODO more details)
+	if bytes.Equal(intermediates, []byte{}) && final == 'd' {
+		// The coordinates in here are 1-based, but we use 0-based coordinates - hence the minus one
+		p.out.outAbsoluteMoveCursorVertical(numericParams(params)[0] - 1)
+		return
+	}
+
+	log.Printf("[UnhandledCsiDispatch] params=%v, intermediates=%v, ignore=%v, r=%c\n", params, intermediates, ignore, final)
+
+	p.out.outUnhandledEscapeSequence(fmt.Sprintf("%s%s%s%s%c",
 		CSI_START,
 		privateMarkers,
 		paramsToString(params),
 		realIntemediates,
-		final)
-
-	//log.Printf("[CsiDispatch] params=%v, intermediates=%v, ignore=%v, r=%c, guessed=%s\n", params, intermediates, ignore, final, s[1:])
-	p.out.outUnhandledEscapeSequence(s)
+		final))
 }
 
 // The final character of an escape sequence has arrived.
