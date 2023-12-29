@@ -1,9 +1,10 @@
-package main
+package terminalscreen
 
 import (
 	"bytes"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 
 	"github.com/danielgatis/go-vte"
@@ -14,6 +15,8 @@ const ESC = "\033"
 const OSC_START = "\033]" // "Operating system command"
 const CSI_START = "\033[" // "Control sequence introducer"
 const DCS_START = "\033P" // "Device control string"
+
+var shouldBeVerboseWhenEncounteringAnUnknownEscapeSequence = os.Getenv("GPARALLEL_DEBUG_SHOW_UNHANDLED_ESCAPE_SEQUENCES") != ""
 
 type EscapeSequenceParser struct {
 	vteParser *vte.Parser
@@ -27,6 +30,7 @@ type EscapeSequenceParserOutput interface {
 	outAbsoluteMoveCursorHorizontal(x int)
 	outDeleteLeft(howMany int)
 	outUnhandledEscapeSequence(s string)
+	outSelectGraphicRenditionAttribute(sgr SelectGraphicRenditionAttribute)
 }
 
 type vtePerformer struct{ out EscapeSequenceParserOutput }
@@ -78,7 +82,7 @@ func (p *vtePerformer) Execute(b byte) {
 		p.out.outDeleteLeft(1)
 		//log.Printf("[Execute] delete\n")
 	} else {
-		log.Printf("TODO: Execute '%c' (%b)\n", b, b)
+		log.Printf("[UnhandledExecute] TODO: Execute '%c' (%b)\n", b, b)
 	}
 
 	//fmt.Printf("TODO: Execute '%c'", b)
@@ -86,8 +90,10 @@ func (p *vtePerformer) Execute(b byte) {
 
 // Pass bytes as part of a device control string to the handle chosen in hook. C0 controls will also be passed to the handler.
 func (p *vtePerformer) Put(b byte) {
+	if shouldBeVerboseWhenEncounteringAnUnknownEscapeSequence {
+		log.Printf("[UnhandledPut] %02x %c\n", b, rune(b))
+	}
 	p.out.outUnhandledEscapeSequence(string(b))
-	//log.Printf("[Put] %02x %c\n", b, rune(b))
 
 	//fmt.Printf("%c", b)
 }
@@ -98,6 +104,7 @@ func (p *vtePerformer) Unhook() {
 	//log.Printf("[Unhook]\n")
 }
 
+// Converts escape sequence params split by go-vte into "params" back into their original encoded form
 func paramsToString[T uint16 | byte](params [][]T) string {
 	var joinedParams bytes.Buffer
 	for i, paramSet := range params {
@@ -115,15 +122,15 @@ func paramsToString[T uint16 | byte](params [][]T) string {
 	return joinedParams.String()
 }
 
-func splitIntermediates(intermediates []byte) (privateMarkers []byte, realIntemediates []byte) {
+func splitIntermediates(intermediates []byte) (privateMarkers []byte, realIntermediates []byte) {
 	for _, b := range intermediates {
 		if b >= 0x30 && b <= 0x3f {
 			privateMarkers = append(privateMarkers, b)
 		} else {
-			realIntemediates = append(realIntemediates, b)
+			realIntermediates = append(realIntermediates, b)
 		}
 	}
-	return privateMarkers, realIntemediates
+	return privateMarkers, realIntermediates
 }
 
 // Invoked when a final character arrives in first part of device control string.
@@ -134,8 +141,11 @@ func splitIntermediates(intermediates []byte) (privateMarkers []byte, realInteme
 //
 // The ignore flag indicates that more than two intermediates arrived and subsequent characters were ignored.
 func (p *vtePerformer) Hook(params [][]uint16, intermediates []byte, ignore bool, final rune) {
-	//log.Printf("[Hook] params=%v, intermediates=%v, ignore=%v, r=%c\n", params, intermediates, ignore, final)
 	privateMarkers, realIntemediates := splitIntermediates(intermediates)
+
+	if shouldBeVerboseWhenEncounteringAnUnknownEscapeSequence {
+		log.Printf("[UnhandledHook] params=%v, intermediates=%v, ignore=%v, r=%c\n", params, intermediates, ignore, final)
+	}
 
 	p.out.outUnhandledEscapeSequence(fmt.Sprintf("%s%s%s%s%c",
 		DCS_START,
@@ -147,7 +157,10 @@ func (p *vtePerformer) Hook(params [][]uint16, intermediates []byte, ignore bool
 
 // Dispatch an operating system command.
 func (p *vtePerformer) OscDispatch(params [][]byte, bellTerminated bool) {
-	//log.Printf("[OscDispatch] params=%v, bellTerminated=%v\n", params, bellTerminated)
+	if shouldBeVerboseWhenEncounteringAnUnknownEscapeSequence {
+		log.Printf("[UnhandledOscDispatch] params=%v, bellTerminated=%v\n", params, bellTerminated)
+	}
+
 	p.out.outUnhandledEscapeSequence(fmt.Sprintf("%s%s",
 		OSC_START,
 		bytes.Join(params, []byte{';'})))
@@ -157,17 +170,17 @@ func numericParams(input [][]uint16) []int {
 	// TODO: make this nicer
 	var result []int
 
-	for _, row := range input {
-		var value int
-		for _, digit := range row {
-			value = value*10 + int(digit)
+	for _, p1 := range input {
+		for _, p2 := range p1 {
+			result = append(result, int(p2))
 		}
-		result = append(result, value)
 	}
 
 	if len(result) == 0 {
+		// TODO: yeah this
 		return []int{0}
 	}
+
 	return result
 }
 
@@ -227,7 +240,15 @@ func (p *vtePerformer) CsiDispatch(params [][]uint16, intermediates []byte, igno
 		return
 	}
 
-	log.Printf("[UnhandledCsiDispatch] params=%v, intermediates=%v, ignore=%v, r=%c\n", params, intermediates, ignore, final)
+	// SGR - Select Graphic Rendition - https://terminalguide.namepad.de/seq/csi_m/
+	if bytes.Equal(intermediates, []byte{}) && final == 'm' {
+		p.out.outSelectGraphicRenditionAttribute(params)
+		return
+	}
+
+	if shouldBeVerboseWhenEncounteringAnUnknownEscapeSequence {
+		log.Printf("[UnhandledCsiDispatch] params=%v, intermediates=%v, ignore=%v, r=%c\n", params, intermediates, ignore, final)
+	}
 
 	p.out.outUnhandledEscapeSequence(fmt.Sprintf("%s%s%s%s%c",
 		CSI_START,
@@ -240,7 +261,9 @@ func (p *vtePerformer) CsiDispatch(params [][]uint16, intermediates []byte, igno
 // The final character of an escape sequence has arrived.
 // The ignore flag indicates that more than two intermediates arrived and subsequent characters were ignored.
 func (p *vtePerformer) EscDispatch(intermediates []byte, ignore bool, final byte) {
-	//log.Printf("[EscDispatch] intermediates=%v, ignore=%v, byte=%02x\n", intermediates, ignore, final)
+	if shouldBeVerboseWhenEncounteringAnUnknownEscapeSequence {
+		log.Printf("[UnhandledEscDispatch] intermediates=%v, ignore=%v, byte=%02x\n", intermediates, ignore, final)
+	}
 
 	p.out.outUnhandledEscapeSequence(fmt.Sprintf("%s%s%c",
 		ESC,

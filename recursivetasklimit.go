@@ -59,7 +59,7 @@ func createLimitServer() {
 
 	// if we've previously crashed (or exited unexpectedly) there could be an old socket file
 	// left over at the same location if PID rollover happens. Let's try to remove it then to
-	// be safe if case it exists
+	// be safe in case it exists
 	_ = os.Remove(listenPath)
 
 	mustSetenv(EnvGparallelChildLimitSocket, listenPath)

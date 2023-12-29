@@ -16,12 +16,13 @@ import (
 
 	"github.com/alessio/shellescape"
 	ptyPkg "github.com/creack/pty"
+	"github.com/karolba/gparallel/terminalscreen"
 	"github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/exp/slices"
 	"golang.org/x/sys/unix"
 )
 
-const MAXBUF = 32 * 1024
+const MAXBUF = 16 * 1024
 
 type Output struct {
 	parts              []byte
@@ -32,8 +33,8 @@ type Output struct {
 	}
 	stdoutPipeOrPty     *os.File
 	stderrPipeOrPty     *os.File
-	stdoutVirtualScreen *Screen
-	stderrVirtualScreen *Screen
+	stdoutVirtualScreen *terminalscreen.Screen
+	stderrVirtualScreen *terminalscreen.Screen
 	winchSignal         chan os.Signal
 	streamClosed        chan struct{}
 	allocator           chunkAllocator
@@ -81,7 +82,7 @@ func (proc *ProcessResult) wait() error {
 	return proc.cmd.Wait()
 }
 
-func (out *Output) appendOrWrite(buf []byte, dataFromFd int, assumedShouldPassToParent bool, screen *Screen) {
+func (out *Output) appendOrWrite(buf []byte, dataFromFd int, assumedShouldPassToParent bool, screen *terminalscreen.Screen) {
 	out.partsMutex.Lock()
 	defer out.partsMutex.Unlock()
 
@@ -131,6 +132,10 @@ func waitIfUsingTooMuchMemory(willSaveBytes int64, out *Output) {
 }
 
 func isEOFFromPtmxDevice(err error) bool {
+	if err == nil {
+		return false
+	}
+
 	if err == io.EOF {
 		return true
 	}
@@ -146,19 +151,44 @@ func isEOFFromPtmxDevice(err error) bool {
 	return false
 }
 
-func readContinuouslyTo(stream io.ReadCloser, throughVirtualScreen *Screen, out *Output, fileDescriptor int) {
-	// Track out.shouldPassToParent ourselves (and update via a channel) to avoid race conditions
-	shouldPassToParent := false
-
-	buffer := make([]byte, MAXBUF)
+func readContinuouslyToChannel(stream io.Reader, readResult chan withError[[]byte]) {
+	// Make two buffers, to operate on one and simultaneously read into the other one, without introducing
+	// race conditions
+	buffer1 := make([]byte, MAXBUF)
+	buffer2 := make([]byte, MAXBUF)
 
 	for {
-		var count int
+		count, err := stream.Read(buffer1)
+		if err != nil {
+			readResult <- withError[[]byte]{err: err}
+			return
+		}
+		readResult <- withError[[]byte]{value: buffer1[:count]}
+
+		count, err = stream.Read(buffer2)
+		if err != nil {
+			readResult <- withError[[]byte]{err: err}
+			return
+		}
+		readResult <- withError[[]byte]{value: buffer2[:count]}
+	}
+}
+
+func readContinuouslyTo(stream io.ReadCloser, throughVirtualScreen *terminalscreen.Screen, out *Output, fileDescriptor int) {
+	// Track out.shouldPassToParent ourselves (and update via a channel) to avoid race conditions
+	//shouldPassToParent := false // TODO: set to out.shouldPassToParent.value
+	shouldPassToParent := out.shouldPassToParent.value
+
+	readResult := make(chan withError[[]byte])
+	go readContinuouslyToChannel(stream, readResult)
+
+	for {
+		var buffer []byte
 		var err error
 
 		select {
-		case countWithError := <-toChannelWithError[int](func() (int, error) { return stream.Read(buffer) }):
-			count = countWithError.value
+		case countWithError := <-readResult:
+			buffer = countWithError.value
 			err = countWithError.err
 		case <-out.shouldPassToParent.becameTrue:
 			shouldPassToParent = true
@@ -169,19 +199,19 @@ func readContinuouslyTo(stream io.ReadCloser, throughVirtualScreen *Screen, out 
 			}
 		}
 
-		if count > 0 {
+		if len(buffer) > 0 {
 			if throughVirtualScreen == nil || shouldPassToParent {
-				waitIfUsingTooMuchMemory(chunkSizeWithHeader(buffer[:count]), out)
-				out.appendOrWrite(buffer[:count], fileDescriptor, shouldPassToParent, throughVirtualScreen)
+				waitIfUsingTooMuchMemory(chunkSizeWithHeader(buffer), out)
+				out.appendOrWrite(buffer, fileDescriptor, shouldPassToParent, throughVirtualScreen)
 			} else {
-				throughVirtualScreen.Advance(buffer[:count])
+				throughVirtualScreen.Advance(buffer)
 			}
 		}
 
-		if throughVirtualScreen != nil && len(throughVirtualScreen.queuedScrollbackOutput) > 0 {
-			waitIfUsingTooMuchMemory(chunkSizeWithHeader(throughVirtualScreen.queuedScrollbackOutput), out)
-			out.appendOrWrite(throughVirtualScreen.queuedScrollbackOutput, fileDescriptor, shouldPassToParent, throughVirtualScreen)
-			throughVirtualScreen.queuedScrollbackOutput = []byte{}
+		if throughVirtualScreen != nil && len(throughVirtualScreen.QueuedScrollbackOutput) > 0 {
+			waitIfUsingTooMuchMemory(chunkSizeWithHeader(throughVirtualScreen.QueuedScrollbackOutput), out)
+			out.appendOrWrite(throughVirtualScreen.QueuedScrollbackOutput, fileDescriptor, shouldPassToParent, throughVirtualScreen)
+			throughVirtualScreen.QueuedScrollbackOutput = []byte{}
 		}
 
 		if errors.Is(err, fs.ErrClosed) {
@@ -196,10 +226,12 @@ func readContinuouslyTo(stream io.ReadCloser, throughVirtualScreen *Screen, out 
 
 	// The process died (or at least closed its output) so need to dump the last visible screen lines into the output
 	if throughVirtualScreen != nil {
-		throughVirtualScreen.End()
-		waitIfUsingTooMuchMemory(chunkSizeWithHeader(throughVirtualScreen.queuedScrollbackOutput), out)
-		out.appendOrWrite(throughVirtualScreen.queuedScrollbackOutput, fileDescriptor, shouldPassToParent, throughVirtualScreen)
-		throughVirtualScreen.queuedScrollbackOutput = []byte{}
+		if !throughVirtualScreen.Ended {
+			throughVirtualScreen.End()
+		}
+		waitIfUsingTooMuchMemory(chunkSizeWithHeader(throughVirtualScreen.QueuedScrollbackOutput), out)
+		out.appendOrWrite(throughVirtualScreen.QueuedScrollbackOutput, fileDescriptor, shouldPassToParent, nil)
+		throughVirtualScreen.QueuedScrollbackOutput = []byte{}
 	}
 
 	out.streamClosed <- struct{}{}
@@ -275,11 +307,11 @@ func runInteractive(cmd *exec.Cmd) *Output {
 		log.Fatalf("Could not get terminal size: %v\n", err)
 	}
 
-	out.stdoutVirtualScreen = NewScreen(size.Cols, size.Rows)
+	out.stdoutVirtualScreen = terminalscreen.NewScreen(int(size.Cols), int(size.Rows))
 	if stdoutAndStderrAreTheSame() {
 		out.stderrVirtualScreen = out.stdoutVirtualScreen
 	} else {
-		out.stderrVirtualScreen = NewScreen(size.Cols, size.Rows)
+		out.stderrVirtualScreen = terminalscreen.NewScreen(int(size.Cols), int(size.Rows))
 	}
 
 	out.stdoutPipeOrPty, stdoutTty, err = createPty(size)
@@ -322,9 +354,9 @@ func runInteractive(cmd *exec.Cmd) *Output {
 			}
 
 			// Resize our own in-process terminal screen representation
-			out.stdoutVirtualScreen.Resize(size.Rows, size.Cols)
+			out.stdoutVirtualScreen.Resize(int(size.Rows), int(size.Cols))
 			if !stdoutAndStderrAreTheSame() {
-				out.stderrVirtualScreen.Resize(size.Rows, size.Cols)
+				out.stderrVirtualScreen.Resize(int(size.Rows), int(size.Cols))
 			}
 		}
 	}()

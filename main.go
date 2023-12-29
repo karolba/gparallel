@@ -302,6 +302,7 @@ func main() {
 		createLimitServer()
 	}
 
+	// Use chann.New() instead of make(chan *ProcessResult) to have a channel with an unbounded dynamically-sized buffer
 	processes := chann.New[*ProcessResult]()
 	go func() {
 		defer processes.Close()
