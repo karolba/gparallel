@@ -122,3 +122,35 @@ func onceValue[T any](f func() T) func() T {
 		return result
 	}
 }
+
+func channel(f func()) <-chan struct{} {
+	ch := make(chan struct{})
+	go func() {
+		f()
+		ch <- struct{}{}
+	}()
+	return ch
+}
+
+func toChannel[T any](f func() T) <-chan T {
+	ch := make(chan T)
+	go func() { ch <- f() }()
+	return ch
+}
+
+type withError[T any] struct {
+	value T
+	err   error
+}
+
+func toChannelWithError[T any](f func() (T, error)) <-chan withError[T] {
+	ch := make(chan withError[T])
+	go func() {
+		val, err := f()
+		ch <- withError[T]{
+			value: val,
+			err:   err,
+		}
+	}()
+	return ch
+}

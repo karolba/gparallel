@@ -16,22 +16,34 @@ import (
 
 	"github.com/alessio/shellescape"
 	ptyPkg "github.com/creack/pty"
+	"github.com/karolba/gparallel/terminalscreen"
 	"github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/exp/slices"
 	"golang.org/x/sys/unix"
 )
 
-const MAXBUF = 32 * 1024
+const MAXBUF = 16 * 1024
 
 type Output struct {
 	parts              []byte
 	partsMutex         sync.Mutex
-	shouldPassToParent bool
-	stdoutPipeOrPty    *os.File
-	stderrPipeOrPty    *os.File
-	winchSignal        chan os.Signal
-	streamClosed       chan struct{}
-	allocator          chunkAllocator
+	shouldPassToParent struct {
+		value      bool
+		becameTrue chan struct{}
+	}
+	stdoutPipeOrPty     *os.File
+	stderrPipeOrPty     *os.File
+	stdoutVirtualScreen *terminalscreen.Screen
+	stderrVirtualScreen *terminalscreen.Screen
+	winchSignal         chan os.Signal
+	streamClosed        chan struct{}
+	allocator           chunkAllocator
+}
+
+func NewOutput() *Output {
+	o := &Output{}
+	o.shouldPassToParent.becameTrue = make(chan struct{}, 2)
+	return o
 }
 
 type ProcessResult struct {
@@ -70,11 +82,29 @@ func (proc *ProcessResult) wait() error {
 	return proc.cmd.Wait()
 }
 
-func (out *Output) appendOrWrite(buf []byte, dataFromFd int) {
+func (out *Output) appendOrWrite(buf []byte, dataFromFd int, assumedShouldPassToParent bool, screen *terminalscreen.Screen) {
 	out.partsMutex.Lock()
 	defer out.partsMutex.Unlock()
 
-	if out.shouldPassToParent {
+	if out.shouldPassToParent.value != assumedShouldPassToParent && screen != nil {
+		// We know for sure (due to using the mutex) this is now a foreground process that should pass its data
+		// directly to stdout/stderr - but our calling function doesn't know that yet - oops.
+		//
+		// The chunk storage for this process no longer exists, so can't do out.appendChunk()
+		//
+		// This wouldn't be a problem (just write to stdout/stderr!) if not for the virtual terminal screen emulation
+		// present in interactive mode. Writing child's output to stdout/stderr before the screen dumps all its contents
+		// is bound to produce out-of-order output.
+		//
+		// Let's just pass it along to the virtual screen for later processing then.
+		//
+		// Could probably get rid of this with some heavy refactoring, to make this function less bloated.
+		// (if only golang supported using sync.RWMutexes in sync.Cond, this whole situation wouldn't have happened)
+		screen.Advance(buf)
+		return
+	}
+
+	if out.shouldPassToParent.value {
 		_, err := standardFdToFile[dataFromFd].Write(buf)
 		if err != nil {
 			log.Fatalf("Syscall write to fd %d: %v\n", dataFromFd, err)
@@ -101,34 +131,107 @@ func waitIfUsingTooMuchMemory(willSaveBytes int64, out *Output) {
 	}
 }
 
-func readContinuouslyTo(stream io.ReadCloser, out *Output, fileDescriptor int) {
-	buffer := make([]byte, MAXBUF)
+func isEOFFromPtmxDevice(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if err == io.EOF {
+		return true
+	}
+
+	var pathError *os.PathError
+	if errors.As(err, &pathError) && pathError.Err == syscall.EIO {
+		// Returning EIO is Linux's way of saying the other end is closed when reading from a ptmx:
+		// https://github.com/creack/pty/issues/21
+		// On BSDs (and macOS) this is signaled by a simple EOF
+		return true
+	}
+
+	return false
+}
+
+func readContinuouslyToChannel(stream io.Reader, readResult chan withError[[]byte]) {
+	// Make two buffers, to operate on one and simultaneously read into the other one, without introducing
+	// race conditions
+	buffer1 := make([]byte, MAXBUF)
+	buffer2 := make([]byte, MAXBUF)
 
 	for {
-		count, err := stream.Read(buffer)
+		count, err := stream.Read(buffer1)
+		if err != nil {
+			readResult <- withError[[]byte]{err: err}
+			return
+		}
+		readResult <- withError[[]byte]{value: buffer1[:count]}
 
-		if count > 0 {
-			waitIfUsingTooMuchMemory(chunkSizeWithHeader(buffer[:count]), out)
-			out.appendOrWrite(buffer[:count], fileDescriptor)
+		count, err = stream.Read(buffer2)
+		if err != nil {
+			readResult <- withError[[]byte]{err: err}
+			return
+		}
+		readResult <- withError[[]byte]{value: buffer2[:count]}
+	}
+}
+
+func readContinuouslyTo(stream io.ReadCloser, throughVirtualScreen *terminalscreen.Screen, out *Output, fileDescriptor int) {
+	// Track out.shouldPassToParent ourselves (and update via a channel) to avoid race conditions
+	//shouldPassToParent := false // TODO: set to out.shouldPassToParent.value
+	shouldPassToParent := out.shouldPassToParent.value
+
+	readResult := make(chan withError[[]byte])
+	go readContinuouslyToChannel(stream, readResult)
+
+	for {
+		var buffer []byte
+		var err error
+
+		select {
+		case countWithError := <-readResult:
+			buffer = countWithError.value
+			err = countWithError.err
+		case <-out.shouldPassToParent.becameTrue:
+			shouldPassToParent = true
+			if throughVirtualScreen != nil {
+				// We became the foreground process ourselves - dump the last visible screen lines (non-scrollback)
+				// to the output.
+				throughVirtualScreen.End()
+			}
 		}
 
-		if err != nil {
-			if err == io.EOF {
-				haveToClose("child stdout/stderr after EOF", stream)
-				break
+		if len(buffer) > 0 {
+			if throughVirtualScreen == nil || shouldPassToParent {
+				waitIfUsingTooMuchMemory(chunkSizeWithHeader(buffer), out)
+				out.appendOrWrite(buffer, fileDescriptor, shouldPassToParent, throughVirtualScreen)
+			} else {
+				throughVirtualScreen.Advance(buffer)
 			}
-			if errors.Is(err, fs.ErrClosed) {
-				break
-			}
-			var pathError *os.PathError
-			if errors.As(err, &pathError) && pathError.Err == syscall.EIO {
-				// Returning EIO is Linux's way of saying the other end is closed when reading from a ptmx:
-				// https://github.com/creack/pty/issues/21
-				haveToClose("child stdout/stderr after EIO", stream)
-				break
-			}
+		}
+
+		if throughVirtualScreen != nil && len(throughVirtualScreen.QueuedScrollbackOutput) > 0 {
+			waitIfUsingTooMuchMemory(chunkSizeWithHeader(throughVirtualScreen.QueuedScrollbackOutput), out)
+			out.appendOrWrite(throughVirtualScreen.QueuedScrollbackOutput, fileDescriptor, shouldPassToParent, throughVirtualScreen)
+			throughVirtualScreen.QueuedScrollbackOutput = []byte{}
+		}
+
+		if errors.Is(err, fs.ErrClosed) {
+			break
+		} else if isEOFFromPtmxDevice(err) {
+			haveToClose("child stdout/stderr after EIO", stream)
+			break
+		} else if err != nil {
 			log.Fatalf("error from read: %v\n", err)
 		}
+	}
+
+	// The process died (or at least closed its output) so need to dump the last visible screen lines into the output
+	if throughVirtualScreen != nil {
+		if !throughVirtualScreen.Ended {
+			throughVirtualScreen.End()
+		}
+		waitIfUsingTooMuchMemory(chunkSizeWithHeader(throughVirtualScreen.QueuedScrollbackOutput), out)
+		out.appendOrWrite(throughVirtualScreen.QueuedScrollbackOutput, fileDescriptor, shouldPassToParent, nil)
+		throughVirtualScreen.QueuedScrollbackOutput = []byte{}
 	}
 
 	out.streamClosed <- struct{}{}
@@ -166,7 +269,7 @@ func createPty(winSize *ptyPkg.Winsize) (pty, tty *os.File, err error) {
 	}
 
 	// the pty package opens /dev/ptmx without O_NONBLOCK. This makes go spawn a lot of threads
-	// when reading from lots of ptys in goroutines. Let's work around that by duping the file desctiptor
+	// when reading from lots of ptys in goroutines. Let's work around that by duping the file descriptor
 	// into a new one, and creating a new *os.File object with a new async fd
 	asyncPtyFd, err := unix.FcntlInt(pty.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
@@ -188,18 +291,27 @@ func createPty(winSize *ptyPkg.Winsize) (pty, tty *os.File, err error) {
 }
 
 func runInteractive(cmd *exec.Cmd) *Output {
+	// set GOMAXPROCS to 1 to make the process running executeAndFlushTty a bit lighter - it's a really lightweight
+	// job, so it shouldn't consume much resources at all
 	cmd.Env = os.Environ()
 	if originalGoMaxProcs, exists := os.LookupEnv("GOMAXPROCS"); exists {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("_GPARALLEL_ORIGINAL_GOMAXPROCS=%s", originalGoMaxProcs))
 	}
 	cmd.Env = append(cmd.Env, "GOMAXPROCS=1")
 
-	out := &Output{}
+	out := NewOutput()
 	var stdoutTty, stderrTty *os.File
 
 	size, err := ptyPkg.GetsizeFull(os.Stdout)
 	if err != nil {
 		log.Fatalf("Could not get terminal size: %v\n", err)
+	}
+
+	out.stdoutVirtualScreen = terminalscreen.NewScreen(int(size.Cols), int(size.Rows))
+	if stdoutAndStderrAreTheSame() {
+		out.stderrVirtualScreen = out.stdoutVirtualScreen
+	} else {
+		out.stderrVirtualScreen = terminalscreen.NewScreen(int(size.Cols), int(size.Rows))
 	}
 
 	out.stdoutPipeOrPty, stdoutTty, err = createPty(size)
@@ -228,17 +340,23 @@ func runInteractive(cmd *exec.Cmd) *Output {
 	signal.Notify(out.winchSignal, syscall.SIGWINCH)
 	go func() {
 		for range out.winchSignal {
-			// TODO: this should handle just one of stderr/stdout being closed
+			// TODO: this should handle just one of stderr/stdout being closed and the other resizing
 
 			size, err := ptyPkg.GetsizeFull(os.Stdout)
 			if err != nil {
 				log.Fatalf("Could not get terminal size on sigwinch: %v\n", err)
 			}
 
+			// Resize the in-kernel virtual pty (to propagate the resize)
 			_ = ptyPkg.Setsize(out.stdoutPipeOrPty, size)
-
 			if !stdoutAndStderrAreTheSame() {
 				_ = ptyPkg.Setsize(out.stderrPipeOrPty, size)
+			}
+
+			// Resize our own in-process terminal screen representation
+			out.stdoutVirtualScreen.Resize(int(size.Rows), int(size.Cols))
+			if !stdoutAndStderrAreTheSame() {
+				out.stderrVirtualScreen.Resize(int(size.Rows), int(size.Cols))
 			}
 		}
 	}()
@@ -251,7 +369,7 @@ func runInteractive(cmd *exec.Cmd) *Output {
 
 	err = cmd.Start()
 	if err != nil {
-		// TODO: take the :2 only if --_execute-and-flush-tty is used - if not using it is even implemented
+		// TODO: take the :2 in the error message only if --_execute-and-flush-tty is used - if not using it is even implemented
 		log.Fatalf("Could not start %v: %v\n", shellescape.QuoteCommand(cmd.Args[2:]), err)
 	}
 
@@ -261,8 +379,8 @@ func runInteractive(cmd *exec.Cmd) *Output {
 func runNonInteractive(cmd *exec.Cmd) *Output {
 	var err error
 	var stdoutWritePipe, stderrWritePipe *os.File
-	out := &Output{}
 
+	out := NewOutput()
 	out.stdoutPipeOrPty, stdoutWritePipe, err = os.Pipe()
 	if err != nil {
 		log.Fatalf("Could not create a pipe for %v's stdout: %v\n", cmd.Args, err)
@@ -327,9 +445,9 @@ func runWithStdin(command []string, stdin io.Reader) (result *ProcessResult) {
 	}
 
 	result.output.streamClosed = make(chan struct{}, 2)
-	go readContinuouslyTo(result.output.stdoutPipeOrPty, result.output, syscall.Stdout)
+	go readContinuouslyTo(result.output.stdoutPipeOrPty, result.output.stdoutVirtualScreen, result.output, syscall.Stdout)
 	if !stdoutAndStderrAreTheSame() {
-		go readContinuouslyTo(result.output.stderrPipeOrPty, result.output, syscall.Stderr)
+		go readContinuouslyTo(result.output.stderrPipeOrPty, result.output.stderrVirtualScreen, result.output, syscall.Stderr)
 	}
 
 	result.startedAt = time.Now()
